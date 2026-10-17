@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Riven Weixin → ChatGPT (Local Lab)",
+  "version": "0.3.0",
+  "description": "Opt-in local-only bridge for one selected ChatGPT tab.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "http://127.0.0.1:8799/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Riven Weixin Bridge"
+  }
+}

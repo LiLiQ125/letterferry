@@ -1,0 +1,9 @@
+{
+  "allowedPeer": {
+    "userId": "live-verified-from-user-id",
+    "chatId": "same-live-verified-from-user-id"
+  },
+  "inboundEnabled": false,
+  "outboundEnabled": false,
+  "liveApproval": "REPLACE_ONLY_AFTER_MANUAL_APPROVAL"
+}
