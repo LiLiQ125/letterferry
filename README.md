@@ -1,6 +1,6 @@
-# Riven Weixin ↔ ChatGPT Bridge
+# 渡信 · LetterFerry
 
-**微信私聊 ↔ 本地 Node.js ↔ 浏览器里指定的 ChatGPT 对话。**
+**把消息渡到另一端：微信私聊 ↔ 本地 Node.js ↔ 你指定的 ChatGPT 网页对话。**
 
 一个面向 Windows + Edge 的本地实验项目。它使用你自己登录的 ChatGPT 网页，不需要 OpenAI API Key；微信端需要你自行完成获许可的机器人二维码登录与一对一配对。不是腾讯、微信或 OpenAI 官方产品。
 

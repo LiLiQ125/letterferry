@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Riven Weixin → ChatGPT (Local Lab)",
+  "name": "LetterFerry · 渡信 (Local Lab)",
   "version": "0.3.0",
-  "description": "Opt-in local-only bridge for one selected ChatGPT tab.",
+  "description": "Local opt-in Weixin to ChatGPT bridge; developer preview.",
   "permissions": [
     "storage",
     "tabs",
