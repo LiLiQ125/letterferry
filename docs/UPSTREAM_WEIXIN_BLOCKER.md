@@ -1,88 +1,70 @@
 # Weixin inbound verification status
 
-Status: **WEIXIN_INBOUND_UNVERIFIED**
+Status: **WEIXIN_INBOUND_VERIFIED / CHATGPT_BROWSER_HANDOFF_REQUIRES_CLEAN_COMPOSER**
 
 Last updated: 2026-10-18
 
-## What is verified
+## Live proof obtained
 
-- ChatGPT Web bridge smoke passed with exact `SUCCEEDED + RIVEN_WEB_SMOKE_OK`.
-- Weixin credentials exist and one exact DM peer is paired.
-- The current implementation carries the documented iLink auth headers, `base_info.channel_version`, `bot_agent`, QR-returned `baseurl`, and `notifyStart` / `notifyStop`.
-- Persistent inbound/outbound flags remain disabled.
-- Local suite passes and `npm run check` passes.
+A controlled one-shot test was completed with the listener already armed before the user sent the fresh challenge.
 
-## Why inbound is still unverified
+Observed sequence:
 
-Earlier live attempts did **not** establish a fully controlled inbound proof:
+1. `notifyStart` succeeded.
+2. `WEIXIN_LISTENER_ARMED` was printed before the challenge was sent.
+3. Clean `server_empty` responses were safely re-armed inside the same bounded receive window.
+4. The fresh challenge arrived on poll 4 as:
+   - `GETUPDATES_OUTCOME=server_messages`
+   - `http_status=200`
+   - `raw_messages=1`
+   - `paired_messages=1`
+   - `cursor_changed=true`
+5. The message was durably persisted before local cursor handling.
+6. LetterFerry queued the authorized inbound event to the ChatGPT browser bridge.
 
-1. The one-shot flow displayed the challenge before `notifyStart` and before the long-poll was known to be in flight. The user could therefore send the new challenge before the listener started.
-2. The diagnostic client used a 35-second client deadline, close to the server long-poll duration. A client-side timeout could be mistaken for an empty server response.
-3. Local cursor non-commit was previously described too strongly. LetterFerry can guarantee that it did not modify its own persisted cursor, but it cannot guarantee that an iLink read had no server-side consumption/replay effect.
+This verifies that the current Weixin account, bot binding, iLink auth/baseurl, notify lifecycle, cursor flow, and paired-DM inbound path can deliver a real fresh message to LetterFerry.
 
-Because of those gaps, the current failure must not be labeled proven account risk-control or proven upstream outage.
+## Browser handoff result
 
-## Fixes now present
+The downstream browser bridge did **not** submit the queued test prompt because the bound ChatGPT composer contained a human draft.
 
-- One-shot approval now arms the listener **before** the challenge is shown.
-- The terminal prints `WEIXIN_LISTENER_ARMED` only after the getUpdates request has actually started.
-- The fresh challenge must be sent after that marker.
-- Diagnostic polling now separates:
-  - `server_messages`
-  - `server_empty`
-  - `client_timeout`
-  - `error`
-- Diagnostic output records elapsed milliseconds, HTTP status, ret/errcode, errmsg category, and cursor presence/change without printing raw cursor/token/content.
-- The diagnostic timeout is 45 seconds.
-- Paired-DM messages observed by one-shot are durably staged before later cursor handling:
-  - the fresh challenge remains `RECEIVED`;
-  - other paired-DM backlog is moved to `DEFERRED_BACKLOG`;
-  - only after durable staging can local cursor advancement be attempted.
-- One-shot uses an exclusive local lock to prevent a second one-shot instance on the same workspace.
+The browser failure was:
 
-## Next controlled acceptance
+- stage: `BROWSER_DELIVERY`
+- code: `COMPOSER_NOT_EMPTY`
 
-Before testing:
+The content script checks this condition before any browser input mutation and before the send button click. Existing regression coverage verifies that a human draft is not overwritten and no click occurs.
 
-1. Confirm no other OpenClaw / LetterFerry / diagnostic consumer is running `getUpdates`.
-2. Keep existing credentials and pairing; do not rescan.
-3. Keep Weixin outbound disabled.
+The linked adapter/Web Host records were later reviewed through the explicit no-replay workflow and both were archived as `REVIEWED_NO_REPLAY`.
 
-Then:
+No browser task was resent and no Weixin outbound reply was attempted.
 
-1. Start `Weixin Web One-Shot 1 Receive.cmd`.
-2. Type `POLL WEIXIN ONCE` to authorize the test.
-3. Wait for `WEIXIN_LISTENER_ARMED`.
-4. Only then send the newly displayed challenge from the already paired Bot DM.
-5. Preserve the exact `GETUPDATES_OUTCOME` line.
-6. Do not retry an outbound send.
+## Current interpretation
 
-Interpretation:
+The earlier status `WEIXIN_INBOUND_UNVERIFIED` is obsolete for this workstation/account pairing.
 
-- `server_messages` with the fresh challenge: inbound transport is verified; continue the existing two-stage acceptance.
-- `server_empty` after a fresh challenge was sent while the poll was already armed: strong evidence for an upstream/account-delivery problem.
-- `client_timeout`: transport remains unverified; do not classify it as server-empty.
-- `error`: use the fixed error category and protocol metadata for diagnosis.
+The remaining acceptance task is now narrower:
 
-## Relevant upstream evidence
+- use a dedicated/clean ChatGPT test conversation;
+- ensure its composer is empty;
+- bind and arm LetterFerry to that conversation;
+- repeat one fresh controlled one-shot;
+- verify ChatGPT reply capture;
+- manually approve exactly one Weixin outbound reply;
+- confirm receipt on the phone.
 
-Tencent/openclaw-weixin has public reports with similar symptoms:
+Do not repeat the already-reviewed unknown browser task.
 
-- #244: successful personal-account binding but empty `getUpdates` across multiple bindings.
-- #267: empty inbound behavior even after correcting a long-poll timeout race.
-- #268: a collaborator confirmed at least one separate delivery failure was affected by platform risk control.
-- #278: a collaborator clarified that API-level success does not necessarily prove client delivery/display.
+## Reliability notes
 
-These reports show that upstream/account-level failure modes exist, but they do **not** prove the currently paired account is risk-controlled.
+- A single iLink long-poll may complete with `server_empty` well before 35 seconds; one observed clean empty response completed at about 18.3 seconds.
+- The one-shot receiver therefore uses one bounded 90-second authorized receive window and may re-arm only after a clean `server_empty`.
+- `client_timeout`, protocol errors, unrelated raw messages, or ambiguous states still stop immediately.
+- LetterFerry can guarantee only whether its **local persisted cursor** changed; it cannot promise server-side replay semantics.
+- Paired-DM messages observed by one-shot are durably staged before later local cursor handling.
 
-## Escalation
-
-If the controlled armed-listener test still produces a genuine `server_empty` response after the fresh challenge was sent, prepare the redacted support report and ask the maintainer to inspect the current account's iLink subscription, bot mapping, delivery queue, and restriction state.
-
-Do not repeatedly rebind, reinstall, clear credentials, or force cursor movement unless the maintainer explicitly asks for it.
-
-## Privacy
+## Privacy and safety
 
 Do not publish bot tokens, context tokens, full account IDs, full paired-peer IDs, chat bodies, browser profiles, keys, SQLite files, or local `data/` contents.
 
-The generated support report intentionally contains fingerprints and protocol outcome metadata instead of raw identifiers.
+The generated support report is a diagnostic snapshot only and must not be treated as the authoritative current acceptance state.

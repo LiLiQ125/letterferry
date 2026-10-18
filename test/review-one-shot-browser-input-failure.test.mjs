@@ -8,7 +8,7 @@ import {AdapterStore} from '../src/store.mjs';
 import {identifyManualInputFailure,closeReviewedInputFailure} from '../scripts/review-one-shot-browser-input-failure.mjs';
 
 const challenge='RWX_WEB_ONCE_'+'A'.repeat(24);
-function fixture(){
+function fixture(code='INPUT_NOT_CONFIRMED'){
  const dir=mkdtempSync(join(tmpdir(),'rwb-web-no-replay-'));
  const adapterPath=join(dir,'adapter.sqlite'),webPath=join(dir,'web.sqlite');
  const a=new AdapterStore(adapterPath),w=new WebHostStore(webPath);
@@ -19,7 +19,7 @@ function fixture(){
    idempotencyKey:'weixin:'+row.id});
  a.bridgeQueued(row.id,event.id);
  w.claim();
- w.unknown(event.id,{stage:'BROWSER_DELIVERY',code:'INPUT_NOT_CONFIRMED'});
+ w.unknown(event.id,{stage:'BROWSER_DELIVERY',code});
  a.close();w.close();
  return {dir,adapterPath,webPath,rowId:row.id,eventId:event.id,
    cleanup:()=>rmSync(dir,{recursive:true,force:true})};
@@ -50,6 +50,22 @@ test('exact input-not-confirmed failure can be manually reviewed but only with e
    a2.close();w2.close();
  }finally{f.cleanup();}
 });
+test('composer-not-empty is also a safe pre-send failure and can close both linked tasks with exact consent',async()=>{
+ const f=fixture('COMPOSER_NOT_EMPTY');
+ try{
+  const result=await closeReviewedInputFailure({
+    adapterPath:f.adapterPath,webPath:f.webPath,isHostOnline:async()=>false,
+    ask:async()=> 'REVIEW '+f.eventId+' NO REPLAY',print:()=>{}
+  });
+  assert.equal(result,'REVIEWED_NO_REPLAY');
+  const a=new AdapterStore(f.adapterPath),w=new WebHostStore(f.webPath);
+  assert.equal(a.get(f.rowId).status,'REVIEWED_NO_REPLAY');
+  assert.equal(w.get(f.eventId).status,'REVIEWED_NO_REPLAY');
+  assert.equal(w.get(f.eventId).reply_text,null);
+  a.close();w.close();
+ }finally{f.cleanup();}
+});
+
 test('host must be offline before irreversible no-replay review',async()=>{
  const f=fixture();
  try{
@@ -65,6 +81,8 @@ test('wrong browser diagnostic or mismatched Web Host input cannot be reviewed a
   text:'[WeChat authorized text | adapter_event=adapter]\n'+challenge,reply_text:null};
  assert.deepEqual(identifyManualInputFailure([row],web,
   {stage:'BROWSER_DELIVERY',code:'INPUT_NOT_CONFIRMED'}),row);
+ assert.deepEqual(identifyManualInputFailure([row],web,
+  {stage:'BROWSER_DELIVERY',code:'COMPOSER_NOT_EMPTY'}),row);
  assert.throws(()=>identifyManualInputFailure([row],web,
   {stage:'BROWSER_DELIVERY',code:'ASSISTANT_TURN_NOT_FOUND'}),/UNEXPECTED_FAILURE/);
  assert.throws(()=>identifyManualInputFailure([row],{...web,text:'other text'},

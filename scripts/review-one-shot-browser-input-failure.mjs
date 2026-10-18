@@ -17,8 +17,9 @@ export function identifyManualInputFailure(adapterRows,webRow,diagnostic){
  const expected='[WeChat authorized text | adapter_event='+row.id+']\n'+row.text;
  if(webRow.text!==expected||webRow.reply_text!==null)
    throw Error('REVIEW_WEB_PAYLOAD_MISMATCH');
+ const safePreSendCodes=new Set(['INPUT_NOT_CONFIRMED','COMPOSER_NOT_EMPTY']);
  if(webRow.status==='DELIVERY_UNKNOWN'&&
-    (diagnostic?.stage!=='BROWSER_DELIVERY'||diagnostic?.code!=='INPUT_NOT_CONFIRMED'))
+    (diagnostic?.stage!=='BROWSER_DELIVERY'||!safePreSendCodes.has(diagnostic?.code)))
    throw Error('REVIEW_UNEXPECTED_FAILURE_CODE');
  if(!['DELIVERY_UNKNOWN','REVIEWED_NO_REPLAY'].includes(webRow.status))
    throw Error('REVIEW_WEB_STATUS_NOT_UNKNOWN');
@@ -42,7 +43,8 @@ export async function closeReviewedInputFailure({
    if(nonterminal.length!==1)throw Error('REVIEW_REQUIRES_ONE_PENDING_WEIXIN_TASK');
    const web=w.get(nonterminal[0].bridge_event_id);
    const row=identifyManualInputFailure(rows,web,w.diagnostic(web?.id));
-   print('INPUT_NOT_CONFIRMED confirmed before browser send click. Weixin outbound was not attempted by this one-shot stage.');
+   const diagnostic=w.diagnostic(web?.id);
+   print((diagnostic?.code||'PRE_SEND_INPUT_FAILURE')+' confirmed before browser send click. Weixin outbound was not attempted by this one-shot stage.');
    print('This review NEVER resends the browser task or any Weixin message. It retains both task records.');
    const confirmation=await ask('After inspecting the bound chat and confirming manual-only sending, type REVIEW '+web.id+' NO REPLAY: ');
    if(confirmation?.trim()!=='REVIEW '+web.id+' NO REPLAY'){

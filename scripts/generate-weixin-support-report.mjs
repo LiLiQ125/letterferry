@@ -47,7 +47,7 @@ const report={
   schema:'letterferry-weixin-support-report-v2',
   generated_at:new Date().toISOString(),
   letterferry_version:pkg.version,
-  classification:'WEIXIN_INBOUND_UNVERIFIED',
+  classification:'DIAGNOSTIC_SNAPSHOT_ONLY',
   safety:{
     local_cursor_committed:false,
     server_replay_effect_known:false,
