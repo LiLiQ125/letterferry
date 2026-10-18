@@ -82,9 +82,11 @@ Still not claimed by this acceptance:
 
 ## Validation
 
-Latest local suite: **302/302 PASS**.
+Latest independent isolated-checkout suite: **303/303 PASS**.
 
 `npm run check`: **PASS**.
+
+Independent review also added regression coverage confirming that a response-body timeout retains an HTTP status already received in the headers; a timeout before headers still reports no status.
 
 ## Privacy and safety
 
