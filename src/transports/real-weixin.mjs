@@ -178,6 +178,7 @@ export async function getUpdatesSnapshot({
     cursorChanged: false, messages: [],
   };
   const elapsed = () => Math.max(0, Number(clock()) - Number(startedAt));
+  let responseStatus = null;
 
   try {
     const pending = fetchImpl(url, {
@@ -190,6 +191,7 @@ export async function getUpdatesSnapshot({
     onRequestStarted?.();
     const response = await pending;
     const httpStatus = Number.isInteger(response?.status) ? response.status : null;
+    responseStatus = httpStatus;
     if (!response?.ok) {
       return { ...baseResult, outcome: 'error', errorCategory: 'http', httpStatus, elapsedMs: elapsed() };
     }
@@ -229,10 +231,12 @@ export async function getUpdatesSnapshot({
       cursorChanged,
     };
   } catch (error) {
+    // Preserve the status once response headers have arrived, even if reading
+    // the body later times out. A timeout before headers still reports null.
     if (error?.name === 'AbortError') {
-      return { ...baseResult, outcome: 'client_timeout', errorCategory: 'timeout', elapsedMs: elapsed() };
+      return { ...baseResult, outcome: 'client_timeout', errorCategory: 'timeout', httpStatus: responseStatus, elapsedMs: elapsed() };
     }
-    return { ...baseResult, outcome: 'error', errorCategory: 'network_or_fetch', elapsedMs: elapsed() };
+    return { ...baseResult, outcome: 'error', errorCategory: 'network_or_fetch', httpStatus: responseStatus, elapsedMs: elapsed() };
   } finally {
     clearTimeout(timer);
   }

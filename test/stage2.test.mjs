@@ -132,6 +132,22 @@ test('getUpdates snapshot distinguishes server messages, server empty, business 
   assert.equal(timeout.httpStatus,null);
 });
 
+test('getUpdates snapshot preserves HTTP status when timeout occurs while reading response body', async()=>{
+  const snapshot=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',cursor:'old',timeoutMs:20,
+    fetchImpl:async(_url,options)=>({
+      ok:true,status:200,
+      text:()=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>{
+        const error=new Error('aborted');error.name='AbortError';reject(error);
+      },{once:true}))
+    })
+  });
+  assert.equal(snapshot.outcome,'client_timeout');
+  assert.equal(snapshot.errorCategory,'timeout');
+  assert.equal(snapshot.httpStatus,200);
+  assert.ok(snapshot.elapsedMs>=0);
+});
+
 test('detailed transport poll preserves diagnostic outcome and only commits returned cursor explicitly', async()=>{
   const store=authStore({cursor:'old'});
   let armed=0;
