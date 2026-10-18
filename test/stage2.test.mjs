@@ -10,7 +10,7 @@ import { PairingDiscovery, createPairingChallenge } from '../src/pairing-discove
 import { renderTerminalQr } from '../src/terminal-qr.mjs';
 import {
   RealWeixinTransport, parseWeixinApiJson, redirectHostToBaseUrl,
-  validateApiBaseUrl, protocolInternalsForTest,
+  validateApiBaseUrl, getUpdatesSnapshot, protocolInternalsForTest,
 } from '../src/transports/real-weixin.mjs';
 
 function response(body, { ok = true, status = 200 } = {}) {
@@ -79,6 +79,94 @@ test('authenticated headers match documented shape without exposing token elsewh
   assert.equal(headers['iLink-App-Id'], 'bot');
   assert.equal(headers['iLink-App-ClientVersion'], String((2 << 16) | (4 << 8) | 10));
   assert.match(Buffer.from(headers['X-WECHAT-UIN'], 'base64').toString(), /^\d+$/);
+});
+
+test('getUpdates snapshot distinguishes server messages, server empty, business error and client timeout', async () => {
+  let armed=0;
+  const messages=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',cursor:'old',timeoutMs:1000,
+    onRequestStarted:()=>{armed++;},
+    fetchImpl:async()=>response({ret:0,errmsg:'',get_updates_buf:'next',msgs:[{
+      message_id:'1',from_user_id:'user-1',to_user_id:'bot-1',message_type:1,message_state:2,
+      item_list:[{type:1,text_item:{text:'x'}}]
+    }]})
+  });
+  assert.equal(armed,1);
+  assert.equal(messages.outcome,'server_messages');
+  assert.equal(messages.httpStatus,200);
+  assert.equal(messages.ret,0);
+  assert.equal(messages.errcode,null);
+  assert.equal(messages.errmsgCategory,'empty');
+  assert.equal(messages.cursorPresent,true);
+  assert.equal(messages.cursorChanged,true);
+  assert.equal(messages.messages.length,1);
+
+  const empty=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',cursor:'old',timeoutMs:1000,
+    fetchImpl:async()=>response({ret:0,msgs:[],get_updates_buf:'old'})
+  });
+  assert.equal(empty.outcome,'server_empty');
+  assert.equal(empty.httpStatus,200);
+  assert.equal(empty.cursorPresent,true);
+  assert.equal(empty.cursorChanged,false);
+
+  const rejected=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',timeoutMs:1000,
+    fetchImpl:async()=>response({ret:-14,errmsg:'stale token'})
+  });
+  assert.equal(rejected.outcome,'error');
+  assert.equal(rejected.errorCategory,'business');
+  assert.equal(rejected.ret,-14);
+  assert.equal(rejected.errmsgCategory,'present');
+
+  const timeout=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',timeoutMs:5,
+    fetchImpl:async(_url,options)=>new Promise((_resolve,reject)=>{
+      options.signal.addEventListener('abort',()=>{
+        const error=new Error('aborted');error.name='AbortError';reject(error);
+      },{once:true});
+    })
+  });
+  assert.equal(timeout.outcome,'client_timeout');
+  assert.equal(timeout.errorCategory,'timeout');
+  assert.equal(timeout.httpStatus,null);
+});
+
+test('getUpdates snapshot preserves HTTP status when timeout occurs while reading response body', async()=>{
+  const snapshot=await getUpdatesSnapshot({
+    baseUrl:'https://ilinkai.weixin.qq.com',token:'secret-token',cursor:'old',timeoutMs:20,
+    fetchImpl:async(_url,options)=>({
+      ok:true,status:200,
+      text:()=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>{
+        const error=new Error('aborted');error.name='AbortError';reject(error);
+      },{once:true}))
+    })
+  });
+  assert.equal(snapshot.outcome,'client_timeout');
+  assert.equal(snapshot.errorCategory,'timeout');
+  assert.equal(snapshot.httpStatus,200);
+  assert.ok(snapshot.elapsedMs>=0);
+});
+
+test('detailed transport poll preserves diagnostic outcome and only commits returned cursor explicitly', async()=>{
+  const store=authStore({cursor:'old'});
+  let armed=0;
+  const transport=new RealWeixinTransport({
+    authStore:store,allowedPeer:peer,inboundEnabled:true,
+    fetchImpl:async()=>response({ret:0,get_updates_buf:'next',msgs:[{
+      message_id:'m-detail',from_user_id:'user-1',to_user_id:'bot-1',
+      message_type:1,message_state:2,context_token:'ctx',
+      item_list:[{type:1,text_item:{text:'hello'}}]
+    }]})
+  });
+  const detailed=await transport.pollDetailed({timeoutMs:45_000,onRequestStarted:()=>{armed++;}});
+  assert.equal(armed,1);
+  assert.equal(detailed.outcome,'server_messages');
+  assert.equal(detailed.rawReceivedCount,1);
+  assert.equal(detailed.messages.length,1);
+  assert.equal(store.state.cursor,'old');
+  await transport.commitPoll();
+  assert.equal(store.state.cursor,'next');
 });
 
 test('inbound-disabled transport performs no fetch', async () => {

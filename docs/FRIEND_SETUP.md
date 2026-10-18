@@ -56,7 +56,8 @@ npm run weixin -- pair
 
 配对成功、扩展已绑定、Host 显示就绪后，建议先用两段式测试：
 
-- `Weixin Web One-Shot 1 Receive.cmd`：只接收你发的测试文本，等 ChatGPT 回复，**不会向微信回发**。
+- `Weixin Web One-Shot 1 Receive.cmd`：先在终端输入 `POLL WEIXIN ONCE` 授权启动唯一的 90 秒受控接收窗口。**不要提前发挑战码**；必须等终端明确打印 `WEIXIN_LISTENER_ARMED` 后，再把随后显示的全新挑战码发送到已配对微信 Bot 私聊。若服务器在你发送前明确返回 `server_empty`，脚本只会在本次已授权窗口内安全重挂下一次监听；`client_timeout`、协议错误或不确定状态仍立即停止。该阶段只接收并等待 ChatGPT 回复，**不会向微信回发**。
+- One-Shot 会把服务端完整响应区分为 `server_messages` / `server_empty` / `client_timeout` / `error`，并记录耗时、HTTP 状态、ret/errcode 与 cursor 元数据；不再把客户端超时冒充成空消息。
 - 核对回复确实属于目标会话后，运行 `Weixin Web One-Shot 2 Send Approved.cmd`，按提示手工确认**恰好一次**微信发送。
 - 请在手机上实际看到回复，再把它当作成功。超时或状态不明时**禁止再点一次**，先查看只读状态：`Check Weixin Bridge Status.cmd`。
 
@@ -70,6 +71,14 @@ npm run weixin -- pair
 
 ## 6. 出问题怎么办？
 
+如果微信已经登录并完成单人配对，但真实消息始终收不到，可以先双击根目录的 `Check Weixin Inbound Health.cmd`。它会执行一次 `notifyStart → getUpdates → notifyStop` 诊断读取，只输出统计状态；**不会修改 LetterFerry 本地持久化 cursor、不会打印聊天正文、不会向微信发送回复**。注意：iLink 服务端是否会把一次读取视为已消费、以及是否保证重放，不由 LetterFerry 控制，因此“本地未提交 cursor”不能被解释成“服务端绝对不会影响未处理消息”。
+
+- `WEIXIN_INBOUND_AVAILABLE`：已配对私聊的入站流量可见，可以继续 one-shot 验收。
+- `WEIXIN_NO_INBOUND_OBSERVED`：服务端完成了这一轮请求但没有返回入站消息。**这本身是不确定结果，不能单独证明上游阻塞**；正常空闲账号也可能返回 0 条。
+- `WEIXIN_INBOUND_CLIENT_TIMEOUT`：客户端 45 秒截止时间先到，没有取得完整服务端响应；不能当成 `server_empty`。
+- 本工作站当前文字链路已经完成一次真实端到端验收，状态为 `END_TO_END_ACCEPTED`；朋友或其他机器仍需各自执行 one-shot 验收。需要重新验证时，确认挑战码是在 `WEIXIN_LISTENER_ARMED` 之后发送，并使用空白、专用的 ChatGPT 测试对话。
+- 需要向维护者说明现场时，可双击 `Generate Weixin Support Report.cmd`。它会在 `reports-local/weixin-support-report.json` 生成脱敏报告；该目录默认被 `.gitignore` 忽略。报告不包含聊天正文、token、context token、完整账号/配对 ID，也不会提交 cursor 或向微信发消息。
+- 当前工作站的完整实机验收证据、可靠性边界与仍未覆盖的范围记录在 `docs/WEIXIN_E2E_ACCEPTANCE.md`，避免后续重复从头排查。
 - `HOST_UNVERIFIED`：检查本地 Host 是否在运行、扩展是否绑定的是当前准确对话，以及扩展的密钥是否来自同一项目。
 - `OUTBOUND_UNKNOWN`、`DELIVERY_UNKNOWN`：**暂停、人工复核，不要重试同一条**。
 - 微信 QR 或账号被拒绝：停止、检查平台说明和授权资格，不尝试绕过限制。

@@ -65,6 +65,20 @@ test('background refuses unrelated URL and only binds the explicitly selected co
  assert.equal(f.session.boundUrl,chat);
  assert.equal(f.session.armed,false);
 });
+test('background keeps an explicit bind across same-conversation ChatGPT route normalization only',async()=>{
+ const f=setup();
+ await f.command('save-key',{key:'f'.repeat(64)});
+ assert.match((await f.command('bind')).message,/已绑定/);
+ f.changeTab('https://chatgpt.com/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?view=compact#latest');
+ assert.match((await f.command('arm')).message,/均已连接/);
+ await f.command('stop');
+ const other=setup();
+ await other.command('save-key',{key:'f'.repeat(64)});
+ await other.command('bind');
+ other.changeTab('https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+ assert.match((await other.command('arm')).message,/BOUND_TAB_CHANGED/);
+ assert.equal(other.session.armed,false);
+});
 test('background arm requires live localhost Host; stop clears readiness',async()=>{
  const f=setup();
  assert.match((await f.command('save-key',{key:'f'.repeat(64)})).message,/已保存/);
@@ -137,10 +151,12 @@ test('unexpected browser exception is redacted to a fixed error code',async()=>{
  assert.equal(JSON.stringify(errors[0]).includes('private.example'),false);
 });
 
-test('read-only page structure inspector is scoped to bound tab, sends no message',async()=>{
+test('read-only page structure inspector is scoped to bound conversation, tolerates URL normalization, sends no message',async()=>{
  const f=setup();
  assert.match((await f.command('inspect')).message,/先绑定/);
  await f.command('bind');
+ // ChatGPT can normalize route shape/query/hash without changing the conversation ID.
+ f.changeTab('https://chatgpt.com/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?view=compact#latest');
  const report=await f.command('inspect');
  assert.match(report.message,/新版助手标记：2/);
  assert.match(report.message,/新版用户标记：3/);

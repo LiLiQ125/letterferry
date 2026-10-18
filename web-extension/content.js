@@ -90,8 +90,20 @@ function newOrChanged(node,role,before) {
   if(!prior) return true;
   return turnText(node,role)!==prior.text;
 }
+function conversationId(value){
+  try{
+    const u=new URL(value);
+    if(u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.username||u.password)return null;
+    const match=u.pathname.match(/^(?:\/c\/|\/g\/[^/]+\/c\/)([0-9a-f-]{36})\/?$/i);
+    return match?.[1]?.toLowerCase()||null;
+  }catch{return null;}
+}
+function sameConversationUrl(a,b){
+  const left=conversationId(a),right=conversationId(b);
+  return Boolean(left&&right&&left===right);
+}
 function structureSurvey(boundUrl) {
-  if(location.href!==boundUrl) return {receiverVersion:7,ready:false,reason:'BOUND_TAB_CHANGED'};
+  if(!sameConversationUrl(location.href,boundUrl)) return {receiverVersion:7,ready:false,reason:'BOUND_TAB_CHANGED'};
   // Read-only structural counts; not a single character of user/model text leaves the tab.
   const count=selector=>document.querySelectorAll(selector).length;
   const assistants=turns('assistant'),lastAssistant=assistants[assistants.length-1];
@@ -142,7 +154,7 @@ function editor() {
   return null;
 }
 function diagnose(boundUrl,allowCurrentTask=false){
-  if(location.href!==boundUrl) return {ready:false,reason:'BOUND_TAB_CHANGED'};
+  if(!sameConversationUrl(location.href,boundUrl)) return {ready:false,reason:'BOUND_TAB_CHANGED'};
   if(occupied && !allowCurrentTask) return {ready:false,reason:'PAGE_BUSY'};
   if(stopping()) return {ready:false,reason:'ASSISTANT_GENERATING'};
   if(!editor()) return {
@@ -210,8 +222,13 @@ function stopping(){return !!document.querySelector('button[data-testid="stop-bu
 function newlineShape(value){
   return String(value??'').replace(/\r\n?/g,'\n').replace(/\u00a0/g,' ');
 }
+function editorShape(value){
+  return newlineShape(value)
+    .replace(/[\u200B\u2060\uFEFF]/g,'')
+    .replace(/\n+$/g,'');
+}
 function sameExceptLineBreaks(expected,actual){
-  const intended=newlineShape(expected),seen=newlineShape(actual);
+  const intended=editorShape(expected),seen=editorShape(actual);
   return seen===intended ||
     (intended.includes('\n') && seen.replace(/\n/g,'')===intended.replace(/\n/g,''));
 }
@@ -240,13 +257,38 @@ async function submit(id,text,boundUrl){
   if(input.tagName==='TEXTAREA'){
     const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input),'value')?.set;
     if(setter) setter.call(input,text); else input.value=text;
-  }else if(!document.execCommand('insertText',false,text))throw Error('INPUT_NOT_ACCEPTED');
-  input.dispatchEvent(new Event('input',{bubbles:true}));
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+  }else{
+    // Some current ChatGPT rich-text composers do not create a usable caret
+    // merely from focus(). Try the legacy insertion first; if it leaves the
+    // editor completely empty, anchor a collapsed Selection inside the exact
+    // verified composer and try once more. Never retry after partial/mismatched
+    // text, because that could duplicate or corrupt a real outgoing message.
+    document.execCommand('insertText',false,text);
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    await pause(80);
+    if(!editorConfirmed(input,text)){
+      const observed=(input.innerText??input.textContent??'');
+      // An empty ProseMirror-style editor may expose only a trailing block
+      // newline/zero-width marker. Treat that as still empty; any meaningful
+      // residue remains a hard stop so partial text is never retried.
+      if(editorShape(observed).length)throw Error('INPUT_NOT_CONFIRMED');
+      const selection=globalThis.getSelection?.();
+      const range=document.createRange?.();
+      if(!selection||!range)throw Error('INPUT_NOT_ACCEPTED');
+      range.selectNodeContents(input);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText',false,text);
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+  }
   await pause(250);
   if(!editorConfirmed(input,text))throw Error('INPUT_NOT_CONFIRMED');
   // ChatGPT often renders/enables the send button asynchronously after an editor update.
   const button=await waitForSend(input);
-  if(location.href!==boundUrl||stopping()||!editorConfirmed(input,text))throw Error('PAGE_NOT_READY');
+  if(!sameConversationUrl(location.href,boundUrl)||stopping()||!editorConfirmed(input,text))throw Error('PAGE_NOT_READY');
   button.click();  // This is the irreversible browser action.
   try{await chrome.runtime.sendMessage({command:'submitted',id});}catch{}
   // Long agent/tool tasks may last far beyond 180 seconds. This is a
@@ -254,7 +296,7 @@ async function submit(id,text,boundUrl){
   const deadline=Date.now()+2*60*60_000;
   let last='',stableAt=0,hasNew=false,submittedUserSeen=false;
   while(Date.now()<deadline) {
-    if(location.href!==boundUrl)throw Error('BOUND_TAB_NAVIGATED');
+    if(!sameConversationUrl(location.href,boundUrl))throw Error('BOUND_TAB_NAVIGATED');
     // Proof of a NEW user turn matching our sent text is needed before accepting
     // any assistant content. This prevents a prior answer being returned as new.
     submittedUserSeen ||= turns('user').some(node=>

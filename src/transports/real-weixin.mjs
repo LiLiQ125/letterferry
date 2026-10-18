@@ -67,6 +67,11 @@ export function buildGetUpdatesRequest(cursor = '') {
   return { path: '/ilink/bot/getupdates', method: 'POST', body: { get_updates_buf: cursor, base_info: baseInfo() } };
 }
 
+export function buildLifecycleRequest(kind) {
+  if (!['start','stop'].includes(kind)) throw new Error('INVALID_LIFECYCLE_KIND');
+  return { path: '/ilink/bot/msg/notify' + kind, method: 'POST', body: { base_info: baseInfo() } };
+}
+
 export function buildGetTypingTicketRequest({toUserId,contextToken}) {
   if(!ID.test(toUserId||'') || typeof contextToken!=='string'||!contextToken)
     throw Error('TYPING_CONFIG_REQUEST_INVALID');
@@ -147,6 +152,96 @@ export function normalizeGetUpdatesResponse(body) {
   return { messages, nextCursor: typeof rawCursor === 'string' && rawCursor ? rawCursor : null };
 }
 
+function errmsgCategory(value) {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value !== 'string') return 'invalid_type';
+  return value.trim() ? 'present' : 'empty';
+}
+
+export async function getUpdatesSnapshot({
+  fetchImpl = fetch, baseUrl, token, cursor = '', timeoutMs = 45_000,
+  onRequestStarted = null, clock = Date.now,
+} = {}) {
+  if (typeof fetchImpl !== 'function' || typeof clock !== 'function') throw new Error('GETUPDATES_SNAPSHOT_DEPENDENCY_INVALID');
+  if (typeof token !== 'string' || !token || typeof cursor !== 'string') throw new Error('GETUPDATES_SNAPSHOT_AUTH_INVALID');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) throw new Error('GETUPDATES_SNAPSHOT_TIMEOUT_INVALID');
+  if (onRequestStarted !== null && typeof onRequestStarted !== 'function') throw new Error('GETUPDATES_SNAPSHOT_ARM_CALLBACK_INVALID');
+
+  const startedAt = clock();
+  const request = buildGetUpdatesRequest(cursor);
+  const url = new URL(request.path, validateApiBaseUrl(baseUrl) + '/');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const baseResult = {
+    elapsedMs: 0, httpStatus: null, ret: null, errcode: null,
+    errmsgCategory: 'absent', nextCursor: null, cursorPresent: false,
+    cursorChanged: false, messages: [],
+  };
+  const elapsed = () => Math.max(0, Number(clock()) - Number(startedAt));
+  let responseStatus = null;
+
+  try {
+    const pending = fetchImpl(url, {
+      method: request.method,
+      headers: commonHeaders({ token }),
+      body: JSON.stringify(request.body),
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    onRequestStarted?.();
+    const response = await pending;
+    const httpStatus = Number.isInteger(response?.status) ? response.status : null;
+    responseStatus = httpStatus;
+    if (!response?.ok) {
+      return { ...baseResult, outcome: 'error', errorCategory: 'http', httpStatus, elapsedMs: elapsed() };
+    }
+    const responseText = await response.text();
+    if (Buffer.byteLength(responseText, 'utf8') > MAX_RESPONSE_BYTES) {
+      return { ...baseResult, outcome: 'error', errorCategory: 'response_too_large', httpStatus, elapsedMs: elapsed() };
+    }
+    let body;
+    try { body = parseWeixinApiJson(responseText); }
+    catch {
+      return { ...baseResult, outcome: 'error', errorCategory: 'invalid_json', httpStatus, elapsedMs: elapsed() };
+    }
+    const ret = body?.ret === undefined ? null : body.ret;
+    const errcode = body?.errcode === undefined ? null : body.errcode;
+    const meta = { ret, errcode, errmsgCategory: errmsgCategory(body?.errmsg) };
+    if ((ret !== null && ret !== 0) || (errcode !== null && errcode !== 0)) {
+      return { ...baseResult, ...meta, outcome: 'error', errorCategory: 'business', httpStatus, elapsedMs: elapsed() };
+    }
+    let normalized;
+    try { normalized = normalizeGetUpdatesResponse(body); }
+    catch (error) {
+      const code = /^GETUPDATES_INVALID_(?:RESPONSE|MESSAGES|CURSOR)$/.test(error?.message || '')
+        ? error.message : 'GETUPDATES_INVALID_RESPONSE';
+      return { ...baseResult, ...meta, outcome: 'error', errorCategory: 'invalid_response', errorCode: code, httpStatus, elapsedMs: elapsed() };
+    }
+    const cursorPresent = Boolean(normalized.nextCursor);
+    const cursorChanged = Boolean(normalized.nextCursor && normalized.nextCursor !== cursor);
+    return {
+      ...meta,
+      outcome: normalized.messages.length ? 'server_messages' : 'server_empty',
+      errorCategory: null,
+      elapsedMs: elapsed(),
+      httpStatus,
+      messages: normalized.messages,
+      nextCursor: normalized.nextCursor,
+      cursorPresent,
+      cursorChanged,
+    };
+  } catch (error) {
+    // Preserve the status once response headers have arrived, even if reading
+    // the body later times out. A timeout before headers still reports null.
+    if (error?.name === 'AbortError') {
+      return { ...baseResult, outcome: 'client_timeout', errorCategory: 'timeout', httpStatus: responseStatus, elapsedMs: elapsed() };
+    }
+    return { ...baseResult, outcome: 'error', errorCategory: 'network_or_fetch', httpStatus: responseStatus, elapsedMs: elapsed() };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchJson(fetchImpl, url, options, timeoutMs, label) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -177,22 +272,56 @@ export class RealWeixinTransport {
     return { baseUrl: FIXED_BASE_URL, protocolMapped: true, qrLoginImplemented: true, networkEnabled: 'explicit-gates', liveEligible: false };
   }
 
-  async poll() {
-    if (!this.inboundEnabled) return [];
-    if (this.pendingCursor !== null) throw new Error('POLL_CURSOR_NOT_COMMITTED');
+  async #lifecycle(kind) {
     const auth = await this.authStore.load();
     const baseUrl = validateApiBaseUrl(auth.baseUrl);
-    const request = buildGetUpdatesRequest(auth.cursor || '');
-    const body = await fetchJson(this.fetch, new URL(request.path, `${baseUrl}/`), {
+    const request = buildLifecycleRequest(kind);
+    const label = kind === 'start' ? 'NOTIFYSTART' : 'NOTIFYSTOP';
+    const body = await fetchJson(this.fetch, new URL(request.path, baseUrl + '/'), {
       method: request.method,
       headers: commonHeaders({ token: auth.botToken }),
       body: JSON.stringify(request.body),
-    }, LONG_POLL_TIMEOUT_MS, 'GETUPDATES');
-    const normalized = normalizeGetUpdatesResponse(body);
-    this.pendingCursor = normalized.nextCursor;
-    return normalized.messages.filter((message) => directEnvelopeRejection(message, auth.accountId) === null
-      && message.from_user_id === this.allowedPeer.userId
-      && canonicalDirectChatId(message.from_user_id) === this.allowedPeer.chatId);
+    }, 4000, label);
+    const code = body?.ret ?? body?.errcode;
+    if (code !== undefined && code !== 0) throw new Error(label + '_REJECTED_' + code);
+    return true;
+  }
+
+  async notifyStart() { return this.#lifecycle('start'); }
+  async notifyStop() { return this.#lifecycle('stop'); }
+
+  async pollDetailed({ timeoutMs = 45_000, onRequestStarted = null } = {}) {
+    if (!this.inboundEnabled) throw new Error('INBOUND_CAPABILITY_DISABLED');
+    if (this.pendingCursor !== null) throw new Error('POLL_CURSOR_NOT_COMMITTED');
+    const auth = await this.authStore.load();
+    const snapshot = await getUpdatesSnapshot({
+      fetchImpl: this.fetch,
+      baseUrl: auth.baseUrl,
+      token: auth.botToken,
+      cursor: auth.cursor || '',
+      timeoutMs,
+      onRequestStarted,
+    });
+    if (snapshot.outcome === 'server_messages' || snapshot.outcome === 'server_empty') {
+      this.pendingCursor = snapshot.nextCursor;
+      const filtered = snapshot.messages.filter((message) => directEnvelopeRejection(message, auth.accountId) === null
+        && message.from_user_id === this.allowedPeer.userId
+        && canonicalDirectChatId(message.from_user_id) === this.allowedPeer.chatId);
+      return { ...snapshot, rawReceivedCount: snapshot.messages.length, messages: filtered };
+    }
+    return { ...snapshot, rawReceivedCount: 0, messages: [] };
+  }
+
+  async poll() {
+    if (!this.inboundEnabled) return [];
+    const snapshot = await this.pollDetailed({ timeoutMs: LONG_POLL_TIMEOUT_MS });
+    if (snapshot.outcome === 'client_timeout') throw new Error('GETUPDATES_TIMEOUT');
+    if (snapshot.outcome === 'error') {
+      if (snapshot.errorCategory === 'business') throw new Error(`GETUPDATES_REJECTED_${snapshot.ret ?? snapshot.errcode ?? 'UNKNOWN'}`);
+      if (snapshot.errorCategory === 'invalid_response' && snapshot.errorCode) throw new Error(snapshot.errorCode);
+      throw new Error(`GETUPDATES_${String(snapshot.errorCategory || 'ERROR').toUpperCase()}`);
+    }
+    return snapshot.messages;
   }
 
   async commitPoll() {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
+import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,oneShotWindowAction,persistOneShotBatch,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH,naturalContentFromText,matchesOneShotChallenge} from '../src/natural-once.mjs';
 
 const peer={userId:'only-paired-user',chatId:'only-paired-user'};
@@ -128,6 +128,110 @@ test('filtering rejects foreign senders and prevents foreign sender affecting th
  assert.equal(p.additionalAllowedCount,0);
  assert.equal(p.canAdvanceCursor,true);
  assert.equal(p.challengeRaw.message_id,'current-one');
+});
+
+test('fresh challenge may appear after one empty read without committing any failed cursor',async()=>{
+ let polls=0,sleeps=0,commits=0;
+ const batches=[[],[message(challenge,{message_id:'arrived-second-read'})]];
+ const made=[];
+ const result=await pollChallengeWithGrace({
+   transportFactory:()=>{
+     const index=made.length;
+     const transport={async poll(){polls++;return batches[index];},async commitPoll(){commits++;}};
+     made.push(transport);return transport;
+   },
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,
+   sleep:async ms=>{assert.equal(ms,5);sleeps++;}
+ });
+ assert.equal(result.attempt,2);
+ assert.equal(result.plan.challengeRaw.message_id,'arrived-second-read');
+ assert.equal(result.transport,made[1]);
+ assert.equal(polls,2);
+ assert.equal(sleeps,1);
+ assert.equal(commits,0);
+});
+test('backlog-only miss may be reread without commit until the fresh challenge appears',async()=>{
+ let factories=0,sleeps=0,commits=0;
+ const old=message('older unread DM',{message_id:'old-unread'});
+ const fresh=message(challenge,{message_id:'fresh-after-backlog'});
+ const batches=[[old],[old,fresh]];
+ const result=await pollChallengeWithGrace({
+   transportFactory:()=>{
+     const index=factories++;
+     return {async poll(){return batches[index];},async commitPoll(){commits++;}};
+   },
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,sleep:async()=>{sleeps++;}
+ });
+ assert.equal(result.attempt,2);
+ assert.equal(result.plan.challengeRaw.message_id,'fresh-after-backlog');
+ assert.equal(result.plan.additionalAllowedCount,1);
+ assert.equal(result.plan.unrecordedAllowedCount,1);
+ assert.equal(result.plan.canAdvanceCursor,false);
+ assert.equal(factories,2);
+ assert.equal(sleeps,1);
+ assert.equal(commits,0);
+});
+test('bounded empty challenge grace stops after the configured attempts with no cursor commit',async()=>{
+ let polls=0,sleeps=0,commits=0;
+ await assert.rejects(()=>pollChallengeWithGrace({
+   transportFactory:()=>({async poll(){polls++;return [];},async commitPoll(){commits++;}}),
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,sleep:async()=>{sleeps++;}
+ }),/CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE/);
+ assert.equal(polls,3);
+ assert.equal(sleeps,2);
+ assert.equal(commits,0);
+});
+test('bounded one-shot receive window only rearms after a clean server-empty result',()=>{
+ assert.equal(oneShotWindowAction({outcome:'server_empty'}),'REARM_AFTER_SERVER_EMPTY');
+ assert.equal(oneShotWindowAction({outcome:'server_messages'}),'PROCESS_SERVER_MESSAGES');
+ assert.equal(oneShotWindowAction({outcome:'client_timeout'}),'STOP_CLIENT_TIMEOUT');
+ assert.equal(oneShotWindowAction({outcome:'error'}),'STOP_ERROR');
+ assert.equal(oneShotWindowAction({outcome:'other'}),'STOP_UNEXPECTED');
+ assert.throws(()=>oneShotWindowAction(null),/INVALID_ONE_SHOT_POLL_RESULT/);
+});
+
+test('one-shot batch is durably staged before cursor handling: challenge stays received and backlog is deferred',()=>{
+ const prior=message('older unread DM',{message_id:'old-one'});
+ const fresh=message(challenge,{message_id:'fresh-one'});
+ const states=new Map();
+ const tx=[];
+ const store={
+   db:{exec(sql){tx.push(sql);}},
+   getByInboundKey(){return null;},
+   deferBacklog(id){states.set(id,'DEFERRED_BACKLOG');}
+ };
+ const adapter={
+   ingestRaw(raw){
+     const id=raw.message_id;
+     const event={
+       id,status:'RECEIVED',account_id:bot,user_id:peer.userId,chat_id:peer.chatId,
+       message_id:id,text:raw.item_list[0].text_item.text
+     };
+     states.set(id,'RECEIVED');
+     return {accepted:true,event};
+   }
+ };
+ const persisted=persistOneShotBatch({
+   store,adapter,updates:[prior,fresh],challenge,accountId:bot,peer
+ });
+ assert.equal(persisted.challengeEvent.message_id,'fresh-one');
+ assert.equal(persisted.deferredNew,1);
+ assert.equal(persisted.existingSafe,0);
+ assert.equal(persisted.total,2);
+ assert.equal(states.get('old-one'),'DEFERRED_BACKLOG');
+ assert.equal(states.get('fresh-one'),'RECEIVED');
+ assert.deepEqual(tx,['BEGIN IMMEDIATE','COMMIT']);
+});
+
+test('one-shot batch persistence rolls back when challenge is absent',()=>{
+ const old=message('older unread DM',{message_id:'old-only'});
+ const tx=[];
+ const store={db:{exec(sql){tx.push(sql);}},getByInboundKey(){return null;},deferBacklog(){}};
+ const adapter={ingestRaw(){throw Error('SHOULD_NOT_INGEST_WITHOUT_CHALLENGE');}};
+ assert.throws(()=>persistOneShotBatch({
+   store,adapter,updates:[old],challenge,accountId:bot,peer
+ }),/CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG/);
+ assert.deepEqual(tx,[]);
 });
 
 test('cursor is never committed when any allowlisted backlog is unread',async()=>{

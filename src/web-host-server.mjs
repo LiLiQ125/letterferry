@@ -37,7 +37,12 @@ export function createWebHostServer({store,key,now=()=>Date.now(),host='127.0.0.
   if (!store || !/^[a-f0-9]{64}$/.test(key)) throw new Error('WEB_HOST_CONFIGURATION_INVALID');
   if (host!=='127.0.0.1') throw new Error('WEB_HOST_LOOPBACK_ONLY');
   let currentHost=null;
-  function alive() {return currentHost && now()-currentHost.lastSeen<25_000;}
+  // Edge MV3 may suspend the background worker between alarm wakeups.
+  // The extension's durable fallback alarm runs every 30 seconds, so a
+  // 25-second Host TTL created a guaranteed false-disconnected window.
+  // Keep a modest 15-second scheduling margin while still expiring stale owners.
+  const HEARTBEAT_TTL_MS=45_000;
+  function alive() {return currentHost && now()-currentHost.lastSeen<HEARTBEAT_TTL_MS;}
   function hostState() { return alive() ? 'HOST_READY' : 'HOST_UNVERIFIED'; }
   const server=http.createServer(async (req,res)=>{
     try {
