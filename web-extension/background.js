@@ -228,7 +228,7 @@ chrome.runtime.onMessage.addListener((m,sender,respond)=>{
       const s=await runtime();
       if(!s.boundTabId||!validUrl(s.boundUrl))return {message:'先绑定指定 ChatGPT 对话，再做只读结构检查'};
       const tab=await chrome.tabs.get(s.boundTabId);
-      if(tab.url!==s.boundUrl)return {message:'已绑定的聊天窗口已变化，请重新绑定'};
+      if(!sameConversationUrl(tab.url,s.boundUrl))return {message:'已绑定的聊天窗口已变化，请重新绑定'};
       let survey;
       try{survey=await chrome.tabs.sendMessage(s.boundTabId,{action:'survey',boundUrl:s.boundUrl});}
       catch{return {message:'页面接收脚本没有响应。请刷新 ChatGPT 标签页，再重新绑定。'};}

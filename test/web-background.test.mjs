@@ -151,10 +151,12 @@ test('unexpected browser exception is redacted to a fixed error code',async()=>{
  assert.equal(JSON.stringify(errors[0]).includes('private.example'),false);
 });
 
-test('read-only page structure inspector is scoped to bound tab, sends no message',async()=>{
+test('read-only page structure inspector is scoped to bound conversation, tolerates URL normalization, sends no message',async()=>{
  const f=setup();
  assert.match((await f.command('inspect')).message,/先绑定/);
  await f.command('bind');
+ // ChatGPT can normalize route shape/query/hash without changing the conversation ID.
+ f.changeTab('https://chatgpt.com/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?view=compact#latest');
  const report=await f.command('inspect');
  assert.match(report.message,/新版助手标记：2/);
  assert.match(report.message,/新版用户标记：3/);
