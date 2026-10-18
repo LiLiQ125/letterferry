@@ -74,6 +74,7 @@ npm run weixin -- pair
 
 - `WEIXIN_INBOUND_AVAILABLE`：已配对私聊的入站流量可见，可以继续 one-shot 验收。
 - `WEIXIN_UPSTREAM_BLOCKED`：生命周期接口可达，但这次 `getUpdates` 没有返回任何入站消息；先停止反复扫码/重绑，保留现场等待上游恢复或继续只读诊断。
+- 需要向维护者说明现场时，可双击 `Generate Weixin Support Report.cmd`。它会在 `reports-local/weixin-support-report.json` 生成脱敏报告；该目录默认被 `.gitignore` 忽略。报告不包含聊天正文、token、context token、完整账号/配对 ID，也不会提交 cursor 或向微信发消息。
 - `HOST_UNVERIFIED`：检查本地 Host 是否在运行、扩展是否绑定的是当前准确对话，以及扩展的密钥是否来自同一项目。
 - `OUTBOUND_UNKNOWN`、`DELIVERY_UNKNOWN`：**暂停、人工复核，不要重试同一条**。
 - 微信 QR 或账号被拒绝：停止、检查平台说明和授权资格，不尝试绕过限制。
