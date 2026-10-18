@@ -76,9 +76,9 @@ npm run weixin -- pair
 - `WEIXIN_INBOUND_AVAILABLE`：已配对私聊的入站流量可见，可以继续 one-shot 验收。
 - `WEIXIN_NO_INBOUND_OBSERVED`：服务端完成了这一轮请求但没有返回入站消息。**这本身是不确定结果，不能单独证明上游阻塞**；正常空闲账号也可能返回 0 条。
 - `WEIXIN_INBOUND_CLIENT_TIMEOUT`：客户端 45 秒截止时间先到，没有取得完整服务端响应；不能当成 `server_empty`。
-- 当前故障分类统一为 `WEIXIN_INBOUND_UNVERIFIED`。需要确定性验证时，使用新的 one-shot，并确认挑战码是在 `WEIXIN_LISTENER_ARMED` 之后发送。
+- 本工作站当前文字链路已经完成一次真实端到端验收，状态为 `END_TO_END_ACCEPTED`；朋友或其他机器仍需各自执行 one-shot 验收。需要重新验证时，确认挑战码是在 `WEIXIN_LISTENER_ARMED` 之后发送，并使用空白、专用的 ChatGPT 测试对话。
 - 需要向维护者说明现场时，可双击 `Generate Weixin Support Report.cmd`。它会在 `reports-local/weixin-support-report.json` 生成脱敏报告；该目录默认被 `.gitignore` 忽略。报告不包含聊天正文、token、context token、完整账号/配对 ID，也不会提交 cursor 或向微信发消息。
-- 当前已知的上游阻塞证据与恢复条件记录在 `docs/UPSTREAM_WEIXIN_BLOCKER.md`，避免后续重复从头排查。
+- 当前工作站的完整实机验收证据、可靠性边界与仍未覆盖的范围记录在 `docs/WEIXIN_E2E_ACCEPTANCE.md`，避免后续重复从头排查。
 - `HOST_UNVERIFIED`：检查本地 Host 是否在运行、扩展是否绑定的是当前准确对话，以及扩展的密钥是否来自同一项目。
 - `OUTBOUND_UNKNOWN`、`DELIVERY_UNKNOWN`：**暂停、人工复核，不要重试同一条**。
 - 微信 QR 或账号被拒绝：停止、检查平台说明和授权资格，不尝试绕过限制。
