@@ -10,7 +10,7 @@ import {AdapterStore} from '../src/store.mjs';
 import {ExistingBridgeClient} from '../src/bridge-client.mjs';
 import {WeixinBridgeAdapter} from '../src/adapter.mjs';
 import {loadEncryptionKey} from '../src/secrets.mjs';
-import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,persistOneShotBatch} from '../src/web-weixin-once-policy.mjs';
+import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,oneShotWindowAction,persistOneShotBatch} from '../src/web-weixin-once-policy.mjs';
 import {durableStartupBatch} from '../src/always-on-policy.mjs';
 import {acquireWebSessionLock} from '../src/web-session-lock.mjs';
 import {hasVerifiedBrowserSmoke} from './verify-web-smoke-history.mjs';
@@ -39,7 +39,7 @@ async function main(){
     store=new AdapterStore(resolve('data/adapter.sqlite'));
     assertOnlySucceeded(store.list());
     const challenge=(natural?NATURAL_PREFIX:CHALLENGE_PREFIX)+randomBytes(12).toString('hex').toUpperCase();
-    stdout.write('ONE-SHOT WEB WEIXIN INBOUND ONLY. This will arm exactly one getUpdates long-poll before you send the fresh challenge.\n');
+    stdout.write('ONE-SHOT WEB WEIXIN INBOUND ONLY. This will arm a bounded 90-second receive window before you send the fresh challenge.\n');
     stdout.write('NO Weixin outbound will be sent. Do NOT send the challenge until the terminal prints WEIXIN_LISTENER_ARMED.\n');
     const approval=await rl.question('Type '+APPROVAL_RECEIVE+' to arm the listener (anything else cancels): ');
     if(approval!==APPROVAL_RECEIVE){stdout.write('CANCELLED_BEFORE_WEIXIN_POLL\n');return;}
@@ -52,74 +52,111 @@ async function main(){
     lifecycleStarted=true;
     stdout.write('WEIXIN_NOTIFY_START_OK\n');
 
+    let shadowCursor=auth.cursor||'';
+    const shadowAuthStore={
+      async load(){return {...auth,cursor:shadowCursor};},
+      async updateCursor(cursor){
+        if(typeof cursor!=='string'||!cursor)throw Error('ONE_SHOT_SHADOW_CURSOR_INVALID');
+        shadowCursor=cursor;
+      }
+    };
     const transport=new RealWeixinTransport({
-      authStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
+      authStore:shadowAuthStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
     });
-    let markArmed;
-    const armed=new Promise(resolveArmed=>{markArmed=resolveArmed;});
-    const pollPromise=transport.pollDetailed({
-      timeoutMs:45_000,
-      onRequestStarted:()=>markArmed()
-    });
-    await Promise.race([
-      armed,
-      pollPromise.then(()=>{throw Error('WEIXIN_LISTENER_ENDED_BEFORE_ARM');})
-    ]);
-    stdout.write('WEIXIN_LISTENER_ARMED. The getUpdates request is already in flight. Send the fresh challenge NOW.\n');
-    if(natural){
-      stdout.write('Send ONE new paired Weixin DM starting with this prefix, one space, then your real question (up to '+NATURAL_MAX_LENGTH+' characters):\n');
-      stdout.write(challenge+'\n');
-      stdout.write('Only the question content (not the prefix) will be forwarded to the bound ChatGPT conversation.\n');
-    }else{
-      stdout.write('Send this exact test text in the ALREADY PAIRED Weixin Bot DM:\n'+challenge+'\n');
-    }
-
-    const detailed=await pollPromise;
-    stdout.write('GETUPDATES_OUTCOME='+detailed.outcome+
-      ' elapsed_ms='+detailed.elapsedMs+
-      ' http_status='+(detailed.httpStatus??'none')+
-      ' ret='+(detailed.ret??'none')+
-      ' errcode='+(detailed.errcode??'none')+
-      ' errmsg_category='+detailed.errmsgCategory+
-      ' cursor_present='+detailed.cursorPresent+
-      ' cursor_changed='+detailed.cursorChanged+
-      ' raw_messages='+detailed.rawReceivedCount+
-      ' paired_messages='+detailed.messages.length+'\n');
-    if(detailed.outcome==='client_timeout')throw Error('ONE_SHOT_GETUPDATES_CLIENT_TIMEOUT_NO_LOCAL_CURSOR_COMMIT');
-    if(detailed.outcome==='server_empty')throw Error('ONE_SHOT_GETUPDATES_SERVER_EMPTY_NO_LOCAL_CURSOR_COMMIT');
-    if(detailed.outcome==='error')throw Error('ONE_SHOT_GETUPDATES_ERROR_'+String(detailed.errorCategory||'UNKNOWN').toUpperCase());
-    if(detailed.outcome!=='server_messages')throw Error('ONE_SHOT_GETUPDATES_UNEXPECTED_OUTCOME');
-
     const bridge=new ExistingBridgeClient({origin:process.env.CHATGPT_BRIDGE_ORIGIN,
       fetchImpl:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(8000)})});
     const adapter=new WeixinBridgeAdapter({accountId:auth.accountId,
       policy:new AllowlistPolicy({accountId:auth.accountId,allowedPeers:[binding]}),
       store,bridge,transport,encryptionKey:key});
 
-    let persisted;
-    try{
-      persisted=persistOneShotBatch({
-        store,adapter,updates:detailed.messages,challenge,accountId:auth.accountId,peer:binding
+    const receiveDeadline=Date.now()+90_000;
+    const maxPolls=6;
+    let pollCount=0,challengeShown=false,persisted=null;
+    while(!persisted && pollCount<maxPolls && Date.now()<receiveDeadline){
+      pollCount++;
+      const remaining=Math.max(1,receiveDeadline-Date.now());
+      const pollTimeout=Math.min(45_000,remaining);
+      let markArmed;
+      const armed=new Promise(resolveArmed=>{markArmed=resolveArmed;});
+      const pollPromise=transport.pollDetailed({
+        timeoutMs:pollTimeout,
+        onRequestStarted:()=>markArmed()
       });
-    }catch(error){
-      if(['CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE','CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG_NO_CURSOR_CHANGE'].includes(error?.message)){
-        if(detailed.messages.length){
+      await Promise.race([
+        armed,
+        pollPromise.then(()=>{throw Error('WEIXIN_LISTENER_ENDED_BEFORE_ARM');})
+      ]);
+
+      if(!challengeShown){
+        challengeShown=true;
+        stdout.write('WEIXIN_LISTENER_ARMED. A bounded receive window is active; clean server_empty responses will re-arm automatically.\n');
+        if(natural){
+          stdout.write('Send ONE new paired Weixin DM starting with this prefix, one space, then your real question (up to '+NATURAL_MAX_LENGTH+' characters):\n');
+          stdout.write(challenge+'\n');
+          stdout.write('Only the question content (not the prefix) will be forwarded to the bound ChatGPT conversation.\n');
+        }else{
+          stdout.write('Send this exact test text in the ALREADY PAIRED Weixin Bot DM NOW:\n'+challenge+'\n');
+        }
+      }else{
+        stdout.write('WEIXIN_LISTENER_REARMED poll='+pollCount+'\n');
+      }
+
+      const detailed=await pollPromise;
+      stdout.write('GETUPDATES_OUTCOME='+detailed.outcome+
+        ' poll='+pollCount+
+        ' elapsed_ms='+detailed.elapsedMs+
+        ' http_status='+(detailed.httpStatus??'none')+
+        ' ret='+(detailed.ret??'none')+
+        ' errcode='+(detailed.errcode??'none')+
+        ' errmsg_category='+detailed.errmsgCategory+
+        ' cursor_present='+detailed.cursorPresent+
+        ' cursor_changed='+detailed.cursorChanged+
+        ' raw_messages='+detailed.rawReceivedCount+
+        ' paired_messages='+detailed.messages.length+'\n');
+
+      const action=oneShotWindowAction(detailed);
+      if(action==='REARM_AFTER_SERVER_EMPTY'){
+        await transport.commitPoll();
+        if(pollCount<maxPolls && Date.now()<receiveDeadline){
+          stdout.write('SERVER_EMPTY_REARMING_WITHIN_AUTHORIZED_WINDOW local_persisted_cursor_unchanged=true\n');
+          continue;
+        }
+        break;
+      }
+      if(action==='STOP_CLIENT_TIMEOUT')throw Error('ONE_SHOT_GETUPDATES_CLIENT_TIMEOUT_NO_LOCAL_CURSOR_COMMIT');
+      if(action==='STOP_ERROR')throw Error('ONE_SHOT_GETUPDATES_ERROR_'+String(detailed.errorCategory||'UNKNOWN').toUpperCase());
+      if(action==='STOP_UNEXPECTED')throw Error('ONE_SHOT_GETUPDATES_UNEXPECTED_OUTCOME');
+      if(detailed.rawReceivedCount>0 && detailed.messages.length===0)
+        throw Error('ONE_SHOT_RAW_MESSAGES_WITHOUT_PAIRED_DM_NO_LOCAL_CURSOR_COMMIT');
+
+      try{
+        persisted=persistOneShotBatch({
+          store,adapter,updates:detailed.messages,challenge,accountId:auth.accountId,peer:binding
+        });
+      }catch(error){
+        if(['CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE','CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG_NO_CURSOR_CHANGE'].includes(error?.message)){
           const archived=durableStartupBatch({
             store,adapter,updates:detailed.messages,accountId:auth.accountId,peer:binding
           });
           await transport.commitPoll();
-          stdout.write('PAIRED_DMS_DURABLY_DEFERRED_BEFORE_STOP total='+archived.total+
+          if(detailed.nextCursor)await authStore.updateCursor(detailed.nextCursor);
+          stdout.write('PAIRED_DMS_DURABLY_DEFERRED_BEFORE_REARM total='+archived.total+
             ' newly_deferred='+archived.newlyDeferred+' existing='+archived.alreadyStored+'\n');
+          if(!detailed.nextCursor)throw Error('ONE_SHOT_BACKLOG_STAGED_WITHOUT_CURSOR_STOP');
+          if(pollCount<maxPolls && Date.now()<receiveDeadline)continue;
+          break;
         }
-        throw Error('ONE_SHOT_FRESH_CHALLENGE_NOT_IN_ARMED_POLL');
+        throw error;
       }
-      throw error;
+
+      await transport.commitPoll();
+      if(detailed.nextCursor)await authStore.updateCursor(detailed.nextCursor);
+      stdout.write('ONE_SHOT_BATCH_DURABLY_PERSISTED total='+persisted.total+
+        ' backlog_deferred='+persisted.deferredNew+
+        ' backlog_existing='+persisted.existingSafe+
+        ' local_cursor_commit_attempted='+detailed.cursorPresent+'\n');
     }
-    await transport.commitPoll();
-    stdout.write('ONE_SHOT_BATCH_DURABLY_PERSISTED total='+persisted.total+
-      ' backlog_deferred='+persisted.deferredNew+
-      ' backlog_existing='+persisted.existingSafe+
-      ' local_cursor_commit_attempted='+detailed.cursorPresent+'\n');
+    if(!persisted)throw Error('ONE_SHOT_RECEIVE_WINDOW_EXPIRED_NO_CHALLENGE');
     const queued=await adapter.submitOneToBridge();
     if(queued?.id!==persisted.challengeEvent.id||queued?.status!=='BRIDGE_QUEUED')throw Error('ONE_SHOT_BRIDGE_NOT_QUEUED');
     stdout.write('WEIXIN_ONE_INBOUND_ACCEPTED_AND_CHATGPT_QUEUED. Waiting for the browser reply (no Weixin outbound).\n');

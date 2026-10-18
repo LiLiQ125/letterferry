@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,persistOneShotBatch,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
+import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,oneShotWindowAction,persistOneShotBatch,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH,naturalContentFromText,matchesOneShotChallenge} from '../src/natural-once.mjs';
 
 const peer={userId:'only-paired-user',chatId:'only-paired-user'};
@@ -181,6 +181,15 @@ test('bounded empty challenge grace stops after the configured attempts with no 
  assert.equal(sleeps,2);
  assert.equal(commits,0);
 });
+test('bounded one-shot receive window only rearms after a clean server-empty result',()=>{
+ assert.equal(oneShotWindowAction({outcome:'server_empty'}),'REARM_AFTER_SERVER_EMPTY');
+ assert.equal(oneShotWindowAction({outcome:'server_messages'}),'PROCESS_SERVER_MESSAGES');
+ assert.equal(oneShotWindowAction({outcome:'client_timeout'}),'STOP_CLIENT_TIMEOUT');
+ assert.equal(oneShotWindowAction({outcome:'error'}),'STOP_ERROR');
+ assert.equal(oneShotWindowAction({outcome:'other'}),'STOP_UNEXPECTED');
+ assert.throws(()=>oneShotWindowAction(null),/INVALID_ONE_SHOT_POLL_RESULT/);
+});
+
 test('one-shot batch is durably staged before cursor handling: challenge stays received and backlog is deferred',()=>{
  const prior=message('older unread DM',{message_id:'old-one'});
  const fresh=message(challenge,{message_id:'fresh-one'});

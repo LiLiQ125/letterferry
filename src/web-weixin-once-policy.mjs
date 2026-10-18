@@ -121,6 +121,15 @@ export async function pollChallengeWithGrace({
   }
   throw lastError||Error('CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE');
 }
+export function oneShotWindowAction(detailed) {
+  if(!detailed || typeof detailed.outcome!=='string')throw Error('INVALID_ONE_SHOT_POLL_RESULT');
+  if(detailed.outcome==='server_empty')return 'REARM_AFTER_SERVER_EMPTY';
+  if(detailed.outcome==='server_messages')return 'PROCESS_SERVER_MESSAGES';
+  if(detailed.outcome==='client_timeout')return 'STOP_CLIENT_TIMEOUT';
+  if(detailed.outcome==='error')return 'STOP_ERROR';
+  return 'STOP_UNEXPECTED';
+}
+
 export function persistOneShotBatch({store,adapter,updates,challenge,accountId,peer}) {
   if(!store?.db || typeof adapter?.ingestRaw!=='function')throw Error('ONE_SHOT_PERSIST_DEPENDENCIES_REQUIRED');
   const plan=planChallengeWithPreservedBacklog(updates,{challenge,accountId,peer,

@@ -56,7 +56,7 @@ npm run weixin -- pair
 
 配对成功、扩展已绑定、Host 显示就绪后，建议先用两段式测试：
 
-- `Weixin Web One-Shot 1 Receive.cmd`：先在终端输入 `POLL WEIXIN ONCE` 授权启动唯一监听。**不要提前发挑战码**；必须等终端明确打印 `WEIXIN_LISTENER_ARMED` 后，再把随后显示的全新挑战码发送到已配对微信 Bot 私聊。该阶段只接收并等待 ChatGPT 回复，**不会向微信回发**。
+- `Weixin Web One-Shot 1 Receive.cmd`：先在终端输入 `POLL WEIXIN ONCE` 授权启动唯一的 90 秒受控接收窗口。**不要提前发挑战码**；必须等终端明确打印 `WEIXIN_LISTENER_ARMED` 后，再把随后显示的全新挑战码发送到已配对微信 Bot 私聊。若服务器在你发送前明确返回 `server_empty`，脚本只会在本次已授权窗口内安全重挂下一次监听；`client_timeout`、协议错误或不确定状态仍立即停止。该阶段只接收并等待 ChatGPT 回复，**不会向微信回发**。
 - One-Shot 会把服务端完整响应区分为 `server_messages` / `server_empty` / `client_timeout` / `error`，并记录耗时、HTTP 状态、ret/errcode 与 cursor 元数据；不再把客户端超时冒充成空消息。
 - 核对回复确实属于目标会话后，运行 `Weixin Web One-Shot 2 Send Approved.cmd`，按提示手工确认**恰好一次**微信发送。
 - 请在手机上实际看到回复，再把它当作成功。超时或状态不明时**禁止再点一次**，先查看只读状态：`Check Weixin Bridge Status.cmd`。
