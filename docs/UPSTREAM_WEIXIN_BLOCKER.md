@@ -1,70 +1,93 @@
-# Weixin inbound verification status
+# Weixin ↔ ChatGPT end-to-end acceptance status
 
-Status: **WEIXIN_INBOUND_VERIFIED / CHATGPT_BROWSER_HANDOFF_REQUIRES_CLEAN_COMPOSER**
+Status: **END_TO_END_ACCEPTED**
 
 Last updated: 2026-10-18
 
-## Live proof obtained
+## Final live acceptance
 
-A controlled one-shot test was completed with the listener already armed before the user sent the fresh challenge.
+A controlled one-shot test completed the full path on this workstation and paired Weixin Bot DM:
 
-Observed sequence:
-
-1. `notifyStart` succeeded.
-2. `WEIXIN_LISTENER_ARMED` was printed before the challenge was sent.
-3. Clean `server_empty` responses were safely re-armed inside the same bounded receive window.
-4. The fresh challenge arrived on poll 4 as:
+1. The dedicated ChatGPT test conversation was bound and armed with an empty composer.
+2. `notifyStart` succeeded and `WEIXIN_LISTENER_ARMED` was printed before the fresh challenge was sent.
+3. Clean `server_empty` responses were re-armed only inside the same bounded 90-second authorized receive window.
+4. The fresh challenge arrived on poll 5 with:
    - `GETUPDATES_OUTCOME=server_messages`
    - `http_status=200`
    - `raw_messages=1`
    - `paired_messages=1`
    - `cursor_changed=true`
-5. The message was durably persisted before local cursor handling.
-6. LetterFerry queued the authorized inbound event to the ChatGPT browser bridge.
+5. The paired-DM message was durably persisted before local cursor handling.
+6. LetterFerry queued the message to the dedicated ChatGPT browser conversation.
+7. A real ChatGPT reply was captured and held locally as:
+   - `ONE_SHOT_READY_FOR_OWNER_REVIEW`
+   - `Weixin outbound calls=0`
+8. After explicit human approval, exactly one Weixin outbound call was made:
+   - `ONE_SHOT_WEIXIN_API_ACCEPTED`
+   - `Outbound calls=1`
+9. The user confirmed the reply was actually visible on the phone in the paired Weixin DM.
+10. Final local database check returned:
+    - `adapterUnsafe=0`
+    - `webUnsafe=0`
+    - `safe=true`
 
-This verifies that the current Weixin account, bot binding, iLink auth/baseurl, notify lifecycle, cursor flow, and paired-DM inbound path can deliver a real fresh message to LetterFerry.
+This is a complete end-to-end acceptance of the current text path:
+**Weixin DM → LetterFerry → bound ChatGPT Web conversation → ChatGPT reply → LetterFerry → Weixin DM**.
 
-## Browser handoff result
+## Earlier browser collision and recovery
 
-The downstream browser bridge did **not** submit the queued test prompt because the bound ChatGPT composer contained a human draft.
-
-The browser failure was:
+An earlier live attempt successfully verified Weixin inbound, but the browser handoff stopped at:
 
 - stage: `BROWSER_DELIVERY`
 - code: `COMPOSER_NOT_EMPTY`
 
-The content script checks this condition before any browser input mutation and before the send button click. Existing regression coverage verifies that a human draft is not overwritten and no click occurs.
+That happened because the bound ChatGPT conversation was also being used interactively and contained a human draft. The content script checks this condition before any input mutation and before the send click, so it did not overwrite the draft or submit the bridge task.
 
-The linked adapter/Web Host records were later reviewed through the explicit no-replay workflow and both were archived as `REVIEWED_NO_REPLAY`.
+The linked adapter/Web Host records were reviewed through the explicit no-replay workflow and archived as `REVIEWED_NO_REPLAY`. No browser task was resent and no Weixin outbound reply was attempted from that ambiguous event.
 
-No browser task was resent and no Weixin outbound reply was attempted.
+A dedicated ChatGPT test conversation was then used for the final successful acceptance.
 
-## Current interpretation
+## Current acceptance scope
 
-The earlier status `WEIXIN_INBOUND_UNVERIFIED` is obsolete for this workstation/account pairing.
+Verified now:
 
-The remaining acceptance task is now narrower:
+- protected Weixin credentials and paired-DM binding;
+- iLink auth/baseurl and notify lifecycle;
+- fresh paired-DM inbound delivery;
+- bounded clean-empty poll re-arming;
+- durable local staging and cursor handling;
+- local Web Host and Edge extension bridge;
+- dedicated ChatGPT conversation submit and reply capture;
+- manual one-time Weixin outbound approval;
+- actual phone-side receipt;
+- no automatic retry on ambiguous delivery;
+- final local stores returned to `safe=true`.
 
-- use a dedicated/clean ChatGPT test conversation;
-- ensure its composer is empty;
-- bind and arm LetterFerry to that conversation;
-- repeat one fresh controlled one-shot;
-- verify ChatGPT reply capture;
-- manually approve exactly one Weixin outbound reply;
-- confirm receipt on the phone.
+Still not claimed by this acceptance:
 
-Do not repeat the already-reviewed unknown browser task.
+- unattended long-running service;
+- multiple peers or group chat;
+- voice;
+- production image sending/receiving;
+- arbitrary browser layouts beyond the tested compatibility surface;
+- guaranteed iLink server-side replay semantics.
 
 ## Reliability notes
 
-- A single iLink long-poll may complete with `server_empty` well before 35 seconds; one observed clean empty response completed at about 18.3 seconds.
-- The one-shot receiver therefore uses one bounded 90-second authorized receive window and may re-arm only after a clean `server_empty`.
-- `client_timeout`, protocol errors, unrelated raw messages, or ambiguous states still stop immediately.
-- LetterFerry can guarantee only whether its **local persisted cursor** changed; it cannot promise server-side replay semantics.
-- Paired-DM messages observed by one-shot are durably staged before later local cursor handling.
+- One iLink long-poll may return `server_empty` in roughly 18 seconds rather than waiting for the client timeout.
+- The one-shot receiver therefore uses one bounded 90-second authorization window and only re-arms after a clean `server_empty`.
+- `client_timeout`, protocol errors, unrelated raw messages, and ambiguous states still stop rather than auto-retry.
+- LetterFerry can state whether its **local persisted cursor** changed; it does not claim control over upstream server replay behavior.
+- Browser `COMPOSER_NOT_EMPTY` is a pre-send safety stop and is eligible for explicit no-replay review only when all linked one-shot invariants match.
+
+## Validation
+
+Latest local suite: **302/302 PASS**.
+
+`npm run check`: **PASS**.
 
 ## Privacy and safety
 
-Do not publish bot tokens, context tokens, full account IDs, full paired-peer IDs, chat bodies, browser profiles, keys, SQLite files, or local `data/` contents.
+Do not publish bot tokens, context tokens, full account IDs, paired-peer identifiers, chat bodies, browser profiles, keys, SQLite files, or local `data/` contents.
 
-The generated support report is a diagnostic snapshot only and must not be treated as the authoritative current acceptance state.
+The generated support report is a diagnostic snapshot only. This document is the current project acceptance record for the verified text path.
