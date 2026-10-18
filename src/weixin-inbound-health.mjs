@@ -18,6 +18,6 @@ export function summarizeInboundHealth(messages,{accountId,peer}={}){
     ? 'WEIXIN_INBOUND_AVAILABLE'
     : messages.length>0
       ? 'WEIXIN_INBOUND_TRAFFIC_PRESENT_PAIRED_DM_NOT_SEEN'
-      : 'WEIXIN_UPSTREAM_BLOCKED';
+      : 'WEIXIN_NO_INBOUND_OBSERVED';
   return {state,received:messages.length,envelopeAccepted,fromPaired,pairedAccepted,rejected};
 }

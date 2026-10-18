@@ -43,8 +43,10 @@ try{
     ' paired_accepted='+summary.pairedAccepted+
     ' envelope_accepted='+summary.envelopeAccepted+
     ' cursor_committed=false outbound_sent=false');
-  if(summary.state==='WEIXIN_UPSTREAM_BLOCKED'){
-    console.log('Meaning: lifecycle is reachable, but getUpdates returned no inbound messages in this check.');
+  if(summary.state==='WEIXIN_NO_INBOUND_OBSERVED'){
+    console.log('Meaning: lifecycle is reachable, but this read-only snapshot saw no inbound messages.');
+    console.log('This is inconclusive by itself: an idle healthy account can also return zero messages.');
+    console.log('Use a fresh one-shot challenge when deterministic inbound verification is required.');
   }else if(summary.state==='WEIXIN_INBOUND_AVAILABLE'){
     console.log('Meaning: paired-DM inbound traffic is visible. Resume one-shot acceptance testing.');
   }else{

@@ -11,9 +11,9 @@ const msg=(from_user_id=peer.userId,extra={})=>({
   ...extra
 });
 
-test('empty raw getUpdates batch reports upstream blocked without content',()=>{
+test('empty raw getUpdates batch is explicitly inconclusive without a fresh challenge',()=>{
   assert.deepEqual(summarizeInboundHealth([],{accountId,peer}),{
-    state:'WEIXIN_UPSTREAM_BLOCKED',received:0,envelopeAccepted:0,
+    state:'WEIXIN_NO_INBOUND_OBSERVED',received:0,envelopeAccepted:0,
     fromPaired:0,pairedAccepted:0,rejected:{}
   });
 });

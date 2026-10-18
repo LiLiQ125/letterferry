@@ -73,7 +73,7 @@ npm run weixin -- pair
 如果微信已经登录并完成单人配对，但真实消息始终收不到，可以先双击根目录的 `Check Weixin Inbound Health.cmd`。它会执行一次 `notifyStart → getUpdates → notifyStop` 健康检查，只输出统计状态；**不会提交 cursor、不会打印聊天正文、不会向微信发送回复**。
 
 - `WEIXIN_INBOUND_AVAILABLE`：已配对私聊的入站流量可见，可以继续 one-shot 验收。
-- `WEIXIN_UPSTREAM_BLOCKED`：生命周期接口可达，但这次 `getUpdates` 没有返回任何入站消息；先停止反复扫码/重绑，保留现场等待上游恢复或继续只读诊断。
+- `WEIXIN_NO_INBOUND_OBSERVED`：生命周期接口可达，但这一轮只读快照没有看到入站消息。**这本身是“不确定”，不能单独证明上游阻塞**；正常空闲账号也可能返回 0 条。需要确定性验证时，应使用新的 one-shot 挑战码。
 - 需要向维护者说明现场时，可双击 `Generate Weixin Support Report.cmd`。它会在 `reports-local/weixin-support-report.json` 生成脱敏报告；该目录默认被 `.gitignore` 忽略。报告不包含聊天正文、token、context token、完整账号/配对 ID，也不会提交 cursor 或向微信发消息。
 - 当前已知的上游阻塞证据与恢复条件记录在 `docs/UPSTREAM_WEIXIN_BLOCKER.md`，避免后续重复从头排查。
 - `HOST_UNVERIFIED`：检查本地 Host 是否在运行、扩展是否绑定的是当前准确对话，以及扩展的密钥是否来自同一项目。
