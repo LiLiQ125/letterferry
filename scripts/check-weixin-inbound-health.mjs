@@ -1,10 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {ProtectedAuthStore} from '../src/auth-store.mjs';
-import {
-  RealWeixinTransport,buildGetUpdatesRequest,normalizeGetUpdatesResponse,
-  protocolInternalsForTest,validateApiBaseUrl
-} from '../src/transports/real-weixin.mjs';
+import {RealWeixinTransport,getUpdatesSnapshot,validateApiBaseUrl} from '../src/transports/real-weixin.mjs';
 import {summarizeInboundHealth} from '../src/weixin-inbound-health.mjs';
 
 const config=JSON.parse(readFileSync(resolve('data/weixin-runtime.json'),'utf8'));
@@ -22,36 +19,47 @@ let lifecycleStarted=false;
 try{
   await transport.notifyStart();
   lifecycleStarted=true;
-  const req=buildGetUpdatesRequest(auth.cursor||'');
-  let normalized;
-  try{
-    const body=await protocolInternalsForTest.fetchJson(
-      fetch,new URL(req.path,validateApiBaseUrl(auth.baseUrl)+'/'),{
-        method:req.method,
-        headers:protocolInternalsForTest.commonHeaders({token:auth.botToken}),
-        body:JSON.stringify(req.body)
-      },35_000,'HEALTH_GETUPDATES'
-    );
-    normalized=normalizeGetUpdatesResponse(body);
-  }catch(error){
-    if(error?.message==='HEALTH_GETUPDATES_TIMEOUT')normalized={messages:[],nextCursor:null};
-    else throw error;
-  }
-  const summary=summarizeInboundHealth(normalized.messages,{accountId:auth.accountId,peer});
-  console.log(summary.state);
-  console.log('received='+summary.received+
+  const snapshot=await getUpdatesSnapshot({
+    fetchImpl:fetch,
+    baseUrl:auth.baseUrl,
+    token:auth.botToken,
+    cursor:auth.cursor||'',
+    timeoutMs:45_000
+  });
+  const messages=snapshot.outcome==='server_messages'?snapshot.messages:[];
+  const summary=summarizeInboundHealth(messages,{accountId:auth.accountId,peer});
+  const state=snapshot.outcome==='client_timeout'
+    ? 'WEIXIN_INBOUND_CLIENT_TIMEOUT'
+    : snapshot.outcome==='error'
+      ? 'WEIXIN_INBOUND_DIAGNOSTIC_ERROR'
+      : summary.state;
+
+  console.log(state);
+  console.log('outcome='+snapshot.outcome+
+    ' elapsed_ms='+snapshot.elapsedMs+
+    ' http_status='+(snapshot.httpStatus??'none')+
+    ' ret='+(snapshot.ret??'none')+
+    ' errcode='+(snapshot.errcode??'none')+
+    ' errmsg_category='+snapshot.errmsgCategory+
+    ' cursor_present='+snapshot.cursorPresent+
+    ' cursor_changed='+snapshot.cursorChanged+
+    ' received='+summary.received+
     ' paired_accepted='+summary.pairedAccepted+
-    ' envelope_accepted='+summary.envelopeAccepted+
-    ' cursor_committed=false outbound_sent=false');
-  if(summary.state==='WEIXIN_NO_INBOUND_OBSERVED'){
-    console.log('Meaning: lifecycle is reachable, but this read-only snapshot saw no inbound messages.');
+    ' local_cursor_committed=false server_replay_effect=unknown outbound_sent=false');
+
+  if(snapshot.outcome==='client_timeout'){
+    console.log('Meaning: the client-side 45s deadline fired before a complete server response was obtained.');
+  }else if(snapshot.outcome==='server_empty'){
+    console.log('Meaning: the server completed the request but returned no inbound messages in this snapshot.');
     console.log('This is inconclusive by itself: an idle healthy account can also return zero messages.');
-    console.log('Use a fresh one-shot challenge when deterministic inbound verification is required.');
-  }else if(summary.state==='WEIXIN_INBOUND_AVAILABLE'){
-    console.log('Meaning: paired-DM inbound traffic is visible. Resume one-shot acceptance testing.');
+  }else if(snapshot.outcome==='server_messages' && summary.state==='WEIXIN_INBOUND_AVAILABLE'){
+    console.log('Meaning: paired-DM inbound traffic is visible. Resume controlled one-shot acceptance.');
+  }else if(snapshot.outcome==='server_messages'){
+    console.log('Meaning: inbound traffic was returned, but no accepted message from the paired DM was visible.');
   }else{
-    console.log('Meaning: inbound traffic exists, but no accepted message from the paired DM was visible.');
+    console.log('Meaning: the diagnostic request ended in a fixed error category; inspect the fields above.');
   }
+  console.log('Important: this diagnostic does not modify the local persisted cursor, but iLink server replay/consumption semantics are not guaranteed by LetterFerry.');
 }finally{
   if(lifecycleStarted){
     try{await transport.notifyStop();console.log('notify_stop=ok');}

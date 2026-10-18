@@ -121,6 +121,39 @@ export async function pollChallengeWithGrace({
   }
   throw lastError||Error('CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE');
 }
+export function persistOneShotBatch({store,adapter,updates,challenge,accountId,peer}) {
+  if(!store?.db || typeof adapter?.ingestRaw!=='function')throw Error('ONE_SHOT_PERSIST_DEPENDENCIES_REQUIRED');
+  const plan=planChallengeWithPreservedBacklog(updates,{challenge,accountId,peer,
+    findStoredInbound:key=>store.getByInboundKey(key)});
+  let challengeEvent=null,deferredNew=0,existingSafe=0;
+  store.db.exec('BEGIN IMMEDIATE');
+  try{
+    for(const raw of updates){
+      const accepted=adapter.ingestRaw(raw);
+      if(!accepted?.accepted || !accepted.event)throw Error('ONE_SHOT_PERSIST_INGEST_REJECTED');
+      if(accepted.event.account_id!==accountId || accepted.event.user_id!==peer.userId ||
+         accepted.event.chat_id!==peer.chatId)throw Error('ONE_SHOT_PERSIST_BINDING_CONFLICT');
+      if(raw===plan.challengeRaw){
+        if(accepted.event.status!=='RECEIVED')throw Error('ONE_SHOT_CHALLENGE_PREEXISTING_OR_UNSAFE');
+        challengeEvent=accepted.event;
+        continue;
+      }
+      if(accepted.event.status==='RECEIVED'){
+        store.deferBacklog(accepted.event.id);
+        deferredNew++;
+      }else if(['SUCCEEDED','REVIEWED_NO_REPLAY','DEFERRED_BACKLOG'].includes(accepted.event.status)){
+        existingSafe++;
+      }else throw Error('ONE_SHOT_BACKLOG_PREEXISTING_PENDING');
+    }
+    if(!challengeEvent)throw Error('ONE_SHOT_CHALLENGE_NOT_PERSISTED');
+    store.db.exec('COMMIT');
+  }catch(error){
+    store.db.exec('ROLLBACK');
+    throw error;
+  }
+  return {plan,challengeEvent,deferredNew,existingSafe,total:updates.length};
+}
+
 export async function commitKnownSafeCursor(transport,plan) {
   if(!plan || typeof plan.canAdvanceCursor!=='boolean' ||
     typeof transport?.commitPoll!=='function') throw Error('INVALID_CURSOR_PLAN');

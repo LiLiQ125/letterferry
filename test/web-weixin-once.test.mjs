@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
+import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,persistOneShotBatch,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH,naturalContentFromText,matchesOneShotChallenge} from '../src/natural-once.mjs';
 
 const peer={userId:'only-paired-user',chatId:'only-paired-user'};
@@ -181,6 +181,50 @@ test('bounded empty challenge grace stops after the configured attempts with no 
  assert.equal(sleeps,2);
  assert.equal(commits,0);
 });
+test('one-shot batch is durably staged before cursor handling: challenge stays received and backlog is deferred',()=>{
+ const prior=message('older unread DM',{message_id:'old-one'});
+ const fresh=message(challenge,{message_id:'fresh-one'});
+ const states=new Map();
+ const tx=[];
+ const store={
+   db:{exec(sql){tx.push(sql);}},
+   getByInboundKey(){return null;},
+   deferBacklog(id){states.set(id,'DEFERRED_BACKLOG');}
+ };
+ const adapter={
+   ingestRaw(raw){
+     const id=raw.message_id;
+     const event={
+       id,status:'RECEIVED',account_id:bot,user_id:peer.userId,chat_id:peer.chatId,
+       message_id:id,text:raw.item_list[0].text_item.text
+     };
+     states.set(id,'RECEIVED');
+     return {accepted:true,event};
+   }
+ };
+ const persisted=persistOneShotBatch({
+   store,adapter,updates:[prior,fresh],challenge,accountId:bot,peer
+ });
+ assert.equal(persisted.challengeEvent.message_id,'fresh-one');
+ assert.equal(persisted.deferredNew,1);
+ assert.equal(persisted.existingSafe,0);
+ assert.equal(persisted.total,2);
+ assert.equal(states.get('old-one'),'DEFERRED_BACKLOG');
+ assert.equal(states.get('fresh-one'),'RECEIVED');
+ assert.deepEqual(tx,['BEGIN IMMEDIATE','COMMIT']);
+});
+
+test('one-shot batch persistence rolls back when challenge is absent',()=>{
+ const old=message('older unread DM',{message_id:'old-only'});
+ const tx=[];
+ const store={db:{exec(sql){tx.push(sql);}},getByInboundKey(){return null;},deferBacklog(){}};
+ const adapter={ingestRaw(){throw Error('SHOULD_NOT_INGEST_WITHOUT_CHALLENGE');}};
+ assert.throws(()=>persistOneShotBatch({
+   store,adapter,updates:[old],challenge,accountId:bot,peer
+ }),/CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG/);
+ assert.deepEqual(tx,[]);
+});
+
 test('cursor is never committed when any allowlisted backlog is unread',async()=>{
  let calls=0;
  const transport={async commitPoll(){calls++;}};

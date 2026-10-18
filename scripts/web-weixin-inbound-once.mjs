@@ -10,7 +10,9 @@ import {AdapterStore} from '../src/store.mjs';
 import {ExistingBridgeClient} from '../src/bridge-client.mjs';
 import {WeixinBridgeAdapter} from '../src/adapter.mjs';
 import {loadEncryptionKey} from '../src/secrets.mjs';
-import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,pollChallengeWithGrace,commitKnownSafeCursor} from '../src/web-weixin-once-policy.mjs';
+import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,persistOneShotBatch} from '../src/web-weixin-once-policy.mjs';
+import {durableStartupBatch} from '../src/always-on-policy.mjs';
+import {acquireWebSessionLock} from '../src/web-session-lock.mjs';
 import {hasVerifiedBrowserSmoke} from './verify-web-smoke-history.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH} from '../src/natural-once.mjs';
 
@@ -29,6 +31,7 @@ async function main(){
   await webReady();
   const key=loadEncryptionKey();
   const authStore=new ProtectedAuthStore();
+  const releaseOneShotLock=acquireWebSessionLock(resolve('data/weixin-one-shot.lock'));
   let store,lifecycleTransport=null,lifecycleStarted=false;
   const rl=createInterface({input:stdin,output:stdout});
   try{
@@ -36,14 +39,9 @@ async function main(){
     store=new AdapterStore(resolve('data/adapter.sqlite'));
     assertOnlySucceeded(store.list());
     const challenge=(natural?NATURAL_PREFIX:CHALLENGE_PREFIX)+randomBytes(12).toString('hex').toUpperCase();
-    stdout.write('ONE-SHOT WEB WEIXIN INBOUND ONLY. This will contact Weixin once and send exactly one authorized test input to your bound ChatGPT tab.\n');
-    stdout.write('NO Weixin outbound will be sent. Other unprocessed DM messages will be preserved; they will not be sent to ChatGPT.\n');
-    if(natural){
-      stdout.write('Send ONE new paired Weixin DM starting with the following verification prefix, a SINGLE SPACE, then your real question (up to '+NATURAL_MAX_LENGTH+' characters).\n');
-      stdout.write('Paste prefix only as the beginning of the message; append one space and your own question: '+challenge+'\n');
-      stdout.write('Only the question content (not the prefix) will be forwarded to the bound ChatGPT conversation.\n');
-    }else stdout.write('Send this exact test text in the ALREADY PAIRED Weixin Bot DM, then come back to the terminal:\n'+challenge+'\n');
-    const approval=await rl.question('After sending that one DM, type '+APPROVAL_RECEIVE+' (anything else cancels): ');
+    stdout.write('ONE-SHOT WEB WEIXIN INBOUND ONLY. This will arm exactly one getUpdates long-poll before you send the fresh challenge.\n');
+    stdout.write('NO Weixin outbound will be sent. Do NOT send the challenge until the terminal prints WEIXIN_LISTENER_ARMED.\n');
+    const approval=await rl.question('Type '+APPROVAL_RECEIVE+' to arm the listener (anything else cancels): ');
     if(approval!==APPROVAL_RECEIVE){stdout.write('CANCELLED_BEFORE_WEIXIN_POLL\n');return;}
     await webReady();
     assertOnlySucceeded(store.list());
@@ -53,36 +51,77 @@ async function main(){
     await lifecycleTransport.notifyStart();
     lifecycleStarted=true;
     stdout.write('WEIXIN_NOTIFY_START_OK\n');
-    // The newly sent DM can take a few seconds to become visible to getupdates.
-    // Retry only a completely empty/foreign-only miss. Each failed attempt uses
-    // a fresh transport from the original durable cursor and is discarded
-    // without commit, so no upstream cursor or unread DM can be consumed.
-    const polled=await pollChallengeWithGrace({
-      transportFactory:()=>new RealWeixinTransport({
-        authStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
-      }),
-      challenge,accountId:auth.accountId,peer:binding,
-      findStoredInbound:inboundKey=>store.getByInboundKey(inboundKey),
-      attempts:3,delayMs:1500,
-      sleep:async ms=>{stdout.write('CHALLENGE_NOT_VISIBLE_YET. Waiting '+ms+'ms without cursor commit.\n');await sleep(ms);}
+
+    const transport=new RealWeixinTransport({
+      authStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
     });
-    const {transport,plan}=polled;
-    stdout.write('CHALLENGE_POLL_ATTEMPTS='+polled.attempt+'\n');
-    stdout.write('SAFE_BATCH_COUNTS other_allowed='+plan.additionalAllowedCount+
-      ' still_unrecorded='+plan.unrecordedAllowedCount+
-      ' cursor_commit_allowed='+plan.canAdvanceCursor+'\n');
-    const raw=plan.challengeRaw;
+    let markArmed;
+    const armed=new Promise(resolveArmed=>{markArmed=resolveArmed;});
+    const pollPromise=transport.pollDetailed({
+      timeoutMs:45_000,
+      onRequestStarted:()=>markArmed()
+    });
+    await Promise.race([
+      armed,
+      pollPromise.then(()=>{throw Error('WEIXIN_LISTENER_ENDED_BEFORE_ARM');})
+    ]);
+    stdout.write('WEIXIN_LISTENER_ARMED. The getUpdates request is already in flight. Send the fresh challenge NOW.\n');
+    if(natural){
+      stdout.write('Send ONE new paired Weixin DM starting with this prefix, one space, then your real question (up to '+NATURAL_MAX_LENGTH+' characters):\n');
+      stdout.write(challenge+'\n');
+      stdout.write('Only the question content (not the prefix) will be forwarded to the bound ChatGPT conversation.\n');
+    }else{
+      stdout.write('Send this exact test text in the ALREADY PAIRED Weixin Bot DM:\n'+challenge+'\n');
+    }
+
+    const detailed=await pollPromise;
+    stdout.write('GETUPDATES_OUTCOME='+detailed.outcome+
+      ' elapsed_ms='+detailed.elapsedMs+
+      ' http_status='+(detailed.httpStatus??'none')+
+      ' ret='+(detailed.ret??'none')+
+      ' errcode='+(detailed.errcode??'none')+
+      ' errmsg_category='+detailed.errmsgCategory+
+      ' cursor_present='+detailed.cursorPresent+
+      ' cursor_changed='+detailed.cursorChanged+
+      ' raw_messages='+detailed.rawReceivedCount+
+      ' paired_messages='+detailed.messages.length+'\n');
+    if(detailed.outcome==='client_timeout')throw Error('ONE_SHOT_GETUPDATES_CLIENT_TIMEOUT_NO_LOCAL_CURSOR_COMMIT');
+    if(detailed.outcome==='server_empty')throw Error('ONE_SHOT_GETUPDATES_SERVER_EMPTY_NO_LOCAL_CURSOR_COMMIT');
+    if(detailed.outcome==='error')throw Error('ONE_SHOT_GETUPDATES_ERROR_'+String(detailed.errorCategory||'UNKNOWN').toUpperCase());
+    if(detailed.outcome!=='server_messages')throw Error('ONE_SHOT_GETUPDATES_UNEXPECTED_OUTCOME');
+
     const bridge=new ExistingBridgeClient({origin:process.env.CHATGPT_BRIDGE_ORIGIN,
       fetchImpl:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(8000)})});
     const adapter=new WeixinBridgeAdapter({accountId:auth.accountId,
       policy:new AllowlistPolicy({accountId:auth.accountId,allowedPeers:[binding]}),
       store,bridge,transport,encryptionKey:key});
-    const ingested=adapter.ingestRaw(raw);
-    if(!ingested.accepted||ingested.event.status!=='RECEIVED')throw Error('NEW_CHALLENGE_WAS_NOT_INGESTED');
-    await commitKnownSafeCursor(transport,plan);
-    if(!plan.canAdvanceCursor) stdout.write('CURSOR_WITHHELD_TO_PRESERVE_UNREAD_WEIXIN_DMS. Future polling may encounter this challenge again; SQLite deduplication applies.\n');
+
+    let persisted;
+    try{
+      persisted=persistOneShotBatch({
+        store,adapter,updates:detailed.messages,challenge,accountId:auth.accountId,peer:binding
+      });
+    }catch(error){
+      if(['CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE','CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG_NO_CURSOR_CHANGE'].includes(error?.message)){
+        if(detailed.messages.length){
+          const archived=durableStartupBatch({
+            store,adapter,updates:detailed.messages,accountId:auth.accountId,peer:binding
+          });
+          await transport.commitPoll();
+          stdout.write('PAIRED_DMS_DURABLY_DEFERRED_BEFORE_STOP total='+archived.total+
+            ' newly_deferred='+archived.newlyDeferred+' existing='+archived.alreadyStored+'\n');
+        }
+        throw Error('ONE_SHOT_FRESH_CHALLENGE_NOT_IN_ARMED_POLL');
+      }
+      throw error;
+    }
+    await transport.commitPoll();
+    stdout.write('ONE_SHOT_BATCH_DURABLY_PERSISTED total='+persisted.total+
+      ' backlog_deferred='+persisted.deferredNew+
+      ' backlog_existing='+persisted.existingSafe+
+      ' local_cursor_commit_attempted='+detailed.cursorPresent+'\n');
     const queued=await adapter.submitOneToBridge();
-    if(queued?.id!==ingested.event.id||queued?.status!=='BRIDGE_QUEUED')throw Error('ONE_SHOT_BRIDGE_NOT_QUEUED');
+    if(queued?.id!==persisted.challengeEvent.id||queued?.status!=='BRIDGE_QUEUED')throw Error('ONE_SHOT_BRIDGE_NOT_QUEUED');
     stdout.write('WEIXIN_ONE_INBOUND_ACCEPTED_AND_CHATGPT_QUEUED. Waiting for the browser reply (no Weixin outbound).\n');
     const deadline=Date.now()+REPLY_WAIT_MS;
     while(Date.now()<deadline){
@@ -104,6 +143,7 @@ async function main(){
     }
     rl.close();
     store?.close();
+    try{releaseOneShotLock();}catch{}
     key.fill(0);
   }
 }
