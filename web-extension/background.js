@@ -13,7 +13,9 @@ function failureCode(error){
 }
 const runtime=async()=>await chrome.storage.session.get(['armed','boundTabId','boundUrl','lastFailure','activeEventId']);
 const config=async()=>await chrome.storage.local.get(['localBridgeKey']);
-function validUrl(url) {try{const u=new URL(url);return u.protocol==='https:'&&u.hostname==='chatgpt.com'&&!u.username&&!u.password&&!u.hash&&/^(?:\/c\/|\/g\/[^/]+\/c\/)[0-9a-f-]{36}\/?$/i.test(u.pathname);}catch{return false;}}
+function conversationId(value){try{const u=new URL(value);if(u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.username||u.password)return null;const m=u.pathname.match(/^(?:\/c\/|\/g\/[^/]+\/c\/)([0-9a-f-]{36})\/?$/i);return m?.[1]?.toLowerCase()||null;}catch{return null;}}
+function validUrl(url){return Boolean(conversationId(url));}
+function sameConversationUrl(a,b){const left=conversationId(a),right=conversationId(b);return Boolean(left&&right&&left===right);}
 async function request(path,data) {
   const {localBridgeKey}=await config();
   if(!/^[a-f0-9]{64}$/.test(localBridgeKey||'')) throw Error('LOCAL_KEY_MISSING');
@@ -25,7 +27,7 @@ async function request(path,data) {
 async function preflight(tabId,boundUrl) {
   if(!validUrl(boundUrl)) throw Error('INVALID_CHATGPT_TAB');
   const tab=await chrome.tabs.get(tabId);
-  if(tab.url!==boundUrl) throw Error('BOUND_TAB_CHANGED');
+  if(!sameConversationUrl(tab.url,boundUrl)) throw Error('BOUND_TAB_CHANGED');
   let answer;
   try {
     answer=await chrome.tabs.sendMessage(tabId,{action:'preflight',boundUrl});
@@ -33,7 +35,7 @@ async function preflight(tabId,boundUrl) {
     // Existing ChatGPT tabs often predate extension installation; content.js was not injected.
     if(!/Receiving end does not exist/i.test(error?.message||'')) throw error;
     const stillSameTab=await chrome.tabs.get(tabId);
-    if(stillSameTab.url!==boundUrl) throw Error('BOUND_TAB_CHANGED');
+    if(!sameConversationUrl(stillSameTab.url,boundUrl)) throw Error('BOUND_TAB_CHANGED');
     try {
       await chrome.scripting.executeScript({target:{tabId,allFrames:false},files:['content.js']});
       answer=await chrome.tabs.sendMessage(tabId,{action:'preflight',boundUrl});
@@ -72,7 +74,7 @@ async function tick() {
     let who;
     if(active.activeEventId){
       const tab=await chrome.tabs.get(active.boundTabId);
-      if(tab.url!==active.boundUrl)throw Error('BOUND_TAB_CHANGED');
+      if(!sameConversationUrl(tab.url,active.boundUrl))throw Error('BOUND_TAB_CHANGED');
       who={tabId:active.boundTabId,url:active.boundUrl};
     }else who=await target();
     await request('/extension/heartbeat',{...who,ready:true});
@@ -150,7 +152,7 @@ async function autoMaintain(){
    // Restore only the URL pinned by the locally authorized always-on config;
    // never select a different ChatGPT conversation by browser tab order.
    let tabs=await chrome.tabs.query({});
-   let candidates=tabs.filter(tab=>tab.url===desired.chatUrl);
+   let candidates=tabs.filter(tab=>sameConversationUrl(tab.url,desired.chatUrl));
    if(candidates.length>1)return;
    let selected=candidates[0];
    if(!selected){

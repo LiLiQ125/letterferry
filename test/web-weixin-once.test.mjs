@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
+import {APPROVAL_RECEIVE,APPROVAL_SEND,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,selectOneExactChallenge,planChallengeWithPreservedBacklog,pollChallengeWithGrace,commitKnownSafeCursor,selectOneReviewedReply} from '../src/web-weixin-once-policy.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH,naturalContentFromText,matchesOneShotChallenge} from '../src/natural-once.mjs';
 
 const peer={userId:'only-paired-user',chatId:'only-paired-user'};
@@ -130,6 +130,57 @@ test('filtering rejects foreign senders and prevents foreign sender affecting th
  assert.equal(p.challengeRaw.message_id,'current-one');
 });
 
+test('fresh challenge may appear after one empty read without committing any failed cursor',async()=>{
+ let polls=0,sleeps=0,commits=0;
+ const batches=[[],[message(challenge,{message_id:'arrived-second-read'})]];
+ const made=[];
+ const result=await pollChallengeWithGrace({
+   transportFactory:()=>{
+     const index=made.length;
+     const transport={async poll(){polls++;return batches[index];},async commitPoll(){commits++;}};
+     made.push(transport);return transport;
+   },
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,
+   sleep:async ms=>{assert.equal(ms,5);sleeps++;}
+ });
+ assert.equal(result.attempt,2);
+ assert.equal(result.plan.challengeRaw.message_id,'arrived-second-read');
+ assert.equal(result.transport,made[1]);
+ assert.equal(polls,2);
+ assert.equal(sleeps,1);
+ assert.equal(commits,0);
+});
+test('backlog-only miss may be reread without commit until the fresh challenge appears',async()=>{
+ let factories=0,sleeps=0,commits=0;
+ const old=message('older unread DM',{message_id:'old-unread'});
+ const fresh=message(challenge,{message_id:'fresh-after-backlog'});
+ const batches=[[old],[old,fresh]];
+ const result=await pollChallengeWithGrace({
+   transportFactory:()=>{
+     const index=factories++;
+     return {async poll(){return batches[index];},async commitPoll(){commits++;}};
+   },
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,sleep:async()=>{sleeps++;}
+ });
+ assert.equal(result.attempt,2);
+ assert.equal(result.plan.challengeRaw.message_id,'fresh-after-backlog');
+ assert.equal(result.plan.additionalAllowedCount,1);
+ assert.equal(result.plan.unrecordedAllowedCount,1);
+ assert.equal(result.plan.canAdvanceCursor,false);
+ assert.equal(factories,2);
+ assert.equal(sleeps,1);
+ assert.equal(commits,0);
+});
+test('bounded empty challenge grace stops after the configured attempts with no cursor commit',async()=>{
+ let polls=0,sleeps=0,commits=0;
+ await assert.rejects(()=>pollChallengeWithGrace({
+   transportFactory:()=>({async poll(){polls++;return [];},async commitPoll(){commits++;}}),
+   challenge,accountId:bot,peer,attempts:3,delayMs:5,sleep:async()=>{sleeps++;}
+ }),/CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE/);
+ assert.equal(polls,3);
+ assert.equal(sleeps,2);
+ assert.equal(commits,0);
+});
 test('cursor is never committed when any allowlisted backlog is unread',async()=>{
  let calls=0;
  const transport={async commitPoll(){calls++;}};

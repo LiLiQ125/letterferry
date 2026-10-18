@@ -70,6 +70,10 @@ npm run weixin -- pair
 
 ## 6. 出问题怎么办？
 
+如果微信已经登录并完成单人配对，但真实消息始终收不到，可以先双击根目录的 `Check Weixin Inbound Health.cmd`。它会执行一次 `notifyStart → getUpdates → notifyStop` 健康检查，只输出统计状态；**不会提交 cursor、不会打印聊天正文、不会向微信发送回复**。
+
+- `WEIXIN_INBOUND_AVAILABLE`：已配对私聊的入站流量可见，可以继续 one-shot 验收。
+- `WEIXIN_UPSTREAM_BLOCKED`：生命周期接口可达，但这次 `getUpdates` 没有返回任何入站消息；先停止反复扫码/重绑，保留现场等待上游恢复或继续只读诊断。
 - `HOST_UNVERIFIED`：检查本地 Host 是否在运行、扩展是否绑定的是当前准确对话，以及扩展的密钥是否来自同一项目。
 - `OUTBOUND_UNKNOWN`、`DELIVERY_UNKNOWN`：**暂停、人工复核，不要重试同一条**。
 - 微信 QR 或账号被拒绝：停止、检查平台说明和授权资格，不尝试绕过限制。

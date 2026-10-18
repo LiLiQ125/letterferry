@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { ExistingBridgeClient } from '../src/bridge-client.mjs';
-import { buildGetUpdatesRequest, buildSendTextRequest, RealWeixinTransport } from '../src/transports/real-weixin.mjs';
+import { buildGetUpdatesRequest, buildLifecycleRequest, buildSendTextRequest, RealWeixinTransport } from '../src/transports/real-weixin.mjs';
 import { seal, unseal } from '../src/secrets.mjs';
 
 test('context token encryption roundtrips without plaintext in ciphertext', () => {
@@ -39,8 +39,12 @@ test('existing bridge client matches the observed HTTP contract', async (t) => {
   assert.equal(requests[1].url, `/${capability}/api/event/event-1`);
 });
 
-test('protocol builders preserve cursor and reply context', () => {
+test('protocol builders preserve cursor, lifecycle and reply context', () => {
   assert.equal(buildGetUpdatesRequest('cursor').body.get_updates_buf, 'cursor');
+  assert.equal(buildLifecycleRequest('start').path, '/ilink/bot/msg/notifystart');
+  assert.equal(buildLifecycleRequest('stop').path, '/ilink/bot/msg/notifystop');
+  assert.equal(buildLifecycleRequest('start').body.base_info.channel_version, '2.4.10');
+  assert.throws(()=>buildLifecycleRequest('other'),/INVALID_LIFECYCLE_KIND/);
   const request = buildSendTextRequest({ toUserId: 'u', clientId: 'c', contextToken: 'ctx', text: 'hi' });
   assert.equal(request.path, '/ilink/bot/sendmessage');
   assert.equal(request.body.msg.context_token, 'ctx');
@@ -48,6 +52,27 @@ test('protocol builders preserve cursor and reply context', () => {
   assert.deepEqual(request.body.msg.item_list, [{ type: 1, text_item: { text: 'hi' } }]);
 });
 
+test('real transport lifecycle uses authenticated notifyStart and notifyStop endpoints', async()=>{
+  const calls=[];
+  const authStore={
+    async load(){return {baseUrl:'https://ilinkai.weixin.qq.com',botToken:'secret-token',accountId:'bot-1',cursor:''};},
+    async updateCursor(){}
+  };
+  const fetchImpl=async(url,options)=>{
+    calls.push({url:String(url),method:options.method,body:JSON.parse(options.body),authorization:options.headers.Authorization});
+    return {ok:true,async text(){return JSON.stringify({ret:0});}};
+  };
+  const transport=new RealWeixinTransport({
+    authStore,allowedPeer:{userId:'user-1',chatId:'user-1'},fetchImpl
+  });
+  assert.equal(await transport.notifyStart(),true);
+  assert.equal(await transport.notifyStop(),true);
+  assert.equal(new URL(calls[0].url).pathname,'/ilink/bot/msg/notifystart');
+  assert.equal(new URL(calls[1].url).pathname,'/ilink/bot/msg/notifystop');
+  assert.equal(calls[0].authorization,'Bearer secret-token');
+  assert.equal(calls[0].body.base_info.channel_version,'2.4.10');
+  assert.equal(calls[1].body.base_info.bot_agent,'RivenWeixinBridgeLab/0.2.0');
+});
 test('real transport reports code-ready but not live-eligible capabilities', () => {
   assert.deepEqual(RealWeixinTransport.feasibility(), {
     baseUrl: 'https://ilinkai.weixin.qq.com', protocolMapped: true, qrLoginImplemented: true,

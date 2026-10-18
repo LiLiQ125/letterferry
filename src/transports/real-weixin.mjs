@@ -67,6 +67,11 @@ export function buildGetUpdatesRequest(cursor = '') {
   return { path: '/ilink/bot/getupdates', method: 'POST', body: { get_updates_buf: cursor, base_info: baseInfo() } };
 }
 
+export function buildLifecycleRequest(kind) {
+  if (!['start','stop'].includes(kind)) throw new Error('INVALID_LIFECYCLE_KIND');
+  return { path: '/ilink/bot/msg/notify' + kind, method: 'POST', body: { base_info: baseInfo() } };
+}
+
 export function buildGetTypingTicketRequest({toUserId,contextToken}) {
   if(!ID.test(toUserId||'') || typeof contextToken!=='string'||!contextToken)
     throw Error('TYPING_CONFIG_REQUEST_INVALID');
@@ -176,6 +181,24 @@ export class RealWeixinTransport {
   static feasibility() {
     return { baseUrl: FIXED_BASE_URL, protocolMapped: true, qrLoginImplemented: true, networkEnabled: 'explicit-gates', liveEligible: false };
   }
+
+  async #lifecycle(kind) {
+    const auth = await this.authStore.load();
+    const baseUrl = validateApiBaseUrl(auth.baseUrl);
+    const request = buildLifecycleRequest(kind);
+    const label = kind === 'start' ? 'NOTIFYSTART' : 'NOTIFYSTOP';
+    const body = await fetchJson(this.fetch, new URL(request.path, baseUrl + '/'), {
+      method: request.method,
+      headers: commonHeaders({ token: auth.botToken }),
+      body: JSON.stringify(request.body),
+    }, 4000, label);
+    const code = body?.ret ?? body?.errcode;
+    if (code !== undefined && code !== 0) throw new Error(label + '_REJECTED_' + code);
+    return true;
+  }
+
+  async notifyStart() { return this.#lifecycle('start'); }
+  async notifyStop() { return this.#lifecycle('stop'); }
 
   async poll() {
     if (!this.inboundEnabled) return [];

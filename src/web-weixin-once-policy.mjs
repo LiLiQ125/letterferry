@@ -94,6 +94,33 @@ export function planChallengeWithPreservedBacklog(updates,{
 }
 // Cursor advancement is itself a data-loss boundary: only commit when the
 // entire allowlisted batch was either this challenge or previously persisted.
+export async function pollChallengeWithGrace({
+  transportFactory,challenge,accountId,peer,findStoredInbound=()=>null,
+  attempts=3,delayMs=1500,sleep=ms=>new Promise(done=>setTimeout(done,ms))
+}) {
+  if(typeof transportFactory!=='function'||!Number.isInteger(attempts)||attempts<1||attempts>5||
+     !Number.isInteger(delayMs)||delayMs<0||delayMs>10_000||typeof sleep!=='function')
+    throw Error('INVALID_CHALLENGE_POLL_CONFIG');
+  let lastError=null;
+  for(let attempt=1;attempt<=attempts;attempt++){
+    const transport=transportFactory();
+    if(!transport||typeof transport.poll!=='function')throw Error('INVALID_CHALLENGE_TRANSPORT');
+    const updates=await transport.poll();
+    try{
+      const plan=planChallengeWithPreservedBacklog(updates,{
+        challenge,accountId,peer,findStoredInbound
+      });
+      return {transport,plan,attempt};
+    }catch(error){
+      lastError=error;
+      const retryableMiss=error?.message==='CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE' ||
+        error?.message==='CHALLENGE_NOT_IN_BATCH_WITH_BACKLOG_NO_CURSOR_CHANGE';
+      if(!retryableMiss||attempt===attempts)throw error;
+      await sleep(delayMs);
+    }
+  }
+  throw lastError||Error('CHALLENGE_NOT_RECEIVED_NO_CURSOR_CHANGE');
+}
 export async function commitKnownSafeCursor(transport,plan) {
   if(!plan || typeof plan.canAdvanceCursor!=='boolean' ||
     typeof transport?.commitPoll!=='function') throw Error('INVALID_CURSOR_PLAN');

@@ -116,7 +116,9 @@ test('a slow model reply remains collectible after heartbeat expiry without allo
   const e=await bridge.enqueue(msg());
   assert.equal((await api('/extension/heartbeat',{...peer,ready:true})).status,200);
   assert.equal((await api('/extension/poll',peer)).body.event.id,e.eventId);
-  ms=30_000; // Heartbeat expired while the ChatGPT browser was generating.
+  ms=44_999; // Still alive across the 30-second MV3 alarm interval plus scheduling margin.
+  assert.equal((await (await fetch(root+'/health')).json()).host,'HOST_READY');
+  ms=46_000; // Heartbeat eventually expires while the ChatGPT browser was generating.
   assert.equal((await (await fetch(root+'/health')).json()).host,'HOST_UNVERIFIED');
   assert.equal((await api('/extension/heartbeat',{tabId:999,url,ready:true})).status,409);
   assert.equal((await api('/extension/submitted',{...peer,id:e.eventId})).status,200);

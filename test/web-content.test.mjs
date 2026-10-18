@@ -12,9 +12,10 @@ function setup({composerText='',assistantText='ready',editorMode='default',gener
   sendMode='testid',renderer='classic',newUser=true,newAssistant=true,reuseNodes=false,
   assistantWrapper=false,bodyDelayed=false,bodyNeverReady=false,extraRoleLabels=0,priorTurnCount=1,
   paragraphFallback=false,includeChromeParagraph=false,toolbarOnly=false,
-  richNewlines='normal',assistantDelayMs=0}={}){
+  richNewlines='normal',assistantDelayMs=0,requiresSelection=false,emptyInnerTextNewline=false,currentUrl=url}={}){
  const userTurns=[],assistantTurns=[];
  let listener,clicks=0,wasSubmitted=false,sendChecks=0,virtualTime=1000,sequence=0;
+ let caretAnchored=false;
  const notifications=[];
  let deferredAssistant=null;
  function makeTurn(role,text,id) {
@@ -87,14 +88,22 @@ function setup({composerText='',assistantText='ready',editorMode='default',gener
    focus(){},dispatchEvent(){},
    closest(selector){return selector==='form'&&['submit','unrelated'].includes(sendMode)?form:null;}
  };
+ if(emptyInnerTextNewline){
+   Object.defineProperty(textarea,'innerText',{
+     get(){return textarea.textContent ? textarea.textContent : '\n';},
+     set(value){textarea.textContent=value;}
+   });
+ }
  if(richNewlines!=='normal'){
    let stored=composerText;
    Object.defineProperty(textarea,'textContent',{
      get(){return stored;},
      set(next){
        const shown=String(next);
-       stored=richNewlines==='truncated' ? shown.slice(0,-1).split('\n').join('') : shown.split('\n').join('');
-       textarea.innerText=richNewlines==='visual' ? shown : undefined;
+       stored=richNewlines==='truncated' ? shown.slice(0,-1).split('\n').join('') :
+         richNewlines==='trailing-block-break' ? shown+'\n' : shown.split('\n').join('');
+       textarea.innerText=richNewlines==='visual' ? shown :
+         richNewlines==='trailing-block-break' ? shown+'\n' : undefined;
      }
    });
  }
@@ -124,8 +133,17 @@ function setup({composerText='',assistantText='ready',editorMode='default',gener
      if(sel.includes('[data-message-author-role="user"]'))return userTurns;
      return [];
    },
+   createRange(){
+     return {
+       selectNodeContents(node){ if(node===textarea) caretAnchored=true; },
+       collapse(){}
+     };
+   },
    execCommand(cmd,_ui,text){
-     if(cmd==='insertText'){textarea.textContent+=text;return true;}return false;
+     if(cmd!=='insertText')return false;
+     if(requiresSelection&&!caretAnchored)return false;
+     textarea.textContent+=text;
+     return true;
    }
  };
  const chrome={runtime:{
@@ -136,18 +154,23 @@ function setup({composerText='',assistantText='ready',editorMode='default',gener
      return {ok:true};
    }
  }};
+ const selection={removeAllRanges(){},addRange(){caretAnchored=true;}};
+ const getSelection=()=>selection;
  const FakeDate=class extends Date {static now(){return virtualTime;}};
  const tick=(done,ms=0)=>{virtualTime+=ms;queueMicrotask(done);};
- vm.runInNewContext(script,{chrome,document,location:{href:url},setTimeout:tick,Date:FakeDate,Event:class{}});
+ vm.runInNewContext(script,{chrome,document,getSelection,URL,location:{href:currentUrl},setTimeout:tick,Date:FakeDate,Event:class{}});
  function invoke(data){return new Promise(resolve=>listener(data,{},resolve));}
  return {invoke,clicks:()=>clicks,wasSubmitted:()=>wasSubmitted,notifications,wait:()=>new Promise(ok=>setImmediate(ok)),
    sendChecks:()=>sendChecks,assistantTurns,userTurns};
 }
 
-test('preflight checks the exact bound URL',async()=>{
- const f=setup();
- assert.equal((await f.invoke({action:'preflight',boundUrl:'https://chatgpt.com/c/other'})).ready,false);
+test('preflight stays bound to the same conversation id across harmless ChatGPT route normalization',async()=>{
+ const sameId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+ const normalized='https://chatgpt.com/g/g-p-project/c/'+sameId+'?view=compact#latest';
+ const f=setup({currentUrl:normalized});
  assert.equal((await f.invoke({action:'preflight',boundUrl:url})).ready,true);
+ assert.equal((await f.invoke({action:'preflight',boundUrl:'https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'})).ready,false);
+ assert.equal((await f.invoke({action:'preflight',boundUrl:'https://example.org/c/'+sameId})).ready,false);
 });
 test('human draft is never overwritten',async()=>{
  const f=setup({composerText:'unfinished private draft'});
@@ -166,6 +189,22 @@ test('2026 grouped DOM: no legacy role attribute, but conversation search units 
  const result=await f.invoke({action:'deliver',id:'fake',text:'new layout prompt',boundUrl:url});
  assert.equal(result.ok,true);assert.equal(result.reply,'RIVEN_WEB_SMOKE_OK');
  assert.equal(f.clicks(),1);
+});
+test('rich editor retries once after anchoring a collapsed selection when focus alone cannot insert',async()=>{
+ const f=setup({renderer:'new',assistantText:'RIVEN_WEB_SMOKE_OK',requiresSelection:true});
+ const result=await f.invoke({action:'deliver',id:'selection-fallback',text:'one-shot prompt',boundUrl:url});
+ assert.equal(result.ok,true);
+ assert.equal(result.reply,'RIVEN_WEB_SMOKE_OK');
+ assert.equal(f.clicks(),1);
+ assert.equal(f.wasSubmitted(),true);
+});
+test('empty rich editor newline sentinel does not block the safe selection retry',async()=>{
+ const f=setup({renderer:'new',assistantText:'RIVEN_WEB_SMOKE_OK',requiresSelection:true,emptyInnerTextNewline:true});
+ const result=await f.invoke({action:'deliver',id:'newline-empty-fallback',text:'one-shot prompt',boundUrl:url});
+ assert.equal(result.ok,true);
+ assert.equal(result.reply,'RIVEN_WEB_SMOKE_OK');
+ assert.equal(f.clicks(),1);
+ assert.equal(f.wasSubmitted(),true);
 });
 test('virtualized history replaces nodes with same count: new turn is still captured',async()=>{
  const f=setup({renderer:'new',assistantText:'new reply',reuseNodes:true});
@@ -349,6 +388,12 @@ test('two-line browser draft with visible innerText line breaks is verified',asy
  const f=setup({renderer:'new',richNewlines:'visual',assistantText:'ACK'});
  const payload='First authorized line\nSecond authorized line';
  const reply=await f.invoke({action:'deliver',id:'once',text:payload,boundUrl:url});
+ assert.equal(reply.ok,true);
+ assert.equal(f.clicks(),1);
+});
+test('single-line rich editor trailing block break is accepted without loosening content match',async()=>{
+ const f=setup({renderer:'new',richNewlines:'trailing-block-break',assistantText:'ACK'});
+ const reply=await f.invoke({action:'deliver',id:'once',text:'one-shot prompt',boundUrl:url});
  assert.equal(reply.ok,true);
  assert.equal(f.clicks(),1);
 });

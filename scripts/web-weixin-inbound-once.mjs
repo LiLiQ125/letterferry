@@ -10,7 +10,7 @@ import {AdapterStore} from '../src/store.mjs';
 import {ExistingBridgeClient} from '../src/bridge-client.mjs';
 import {WeixinBridgeAdapter} from '../src/adapter.mjs';
 import {loadEncryptionKey} from '../src/secrets.mjs';
-import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,planChallengeWithPreservedBacklog,commitKnownSafeCursor} from '../src/web-weixin-once-policy.mjs';
+import {CHALLENGE_PREFIX,APPROVAL_RECEIVE,verifyWebHostHealth,requireDisabledBinding,assertOnlySucceeded,pollChallengeWithGrace,commitKnownSafeCursor} from '../src/web-weixin-once-policy.mjs';
 import {hasVerifiedBrowserSmoke} from './verify-web-smoke-history.mjs';
 import {NATURAL_PREFIX,NATURAL_MAX_LENGTH} from '../src/natural-once.mjs';
 
@@ -29,7 +29,7 @@ async function main(){
   await webReady();
   const key=loadEncryptionKey();
   const authStore=new ProtectedAuthStore();
-  let store;
+  let store,lifecycleTransport=null,lifecycleStarted=false;
   const rl=createInterface({input:stdin,output:stdout});
   try{
     const auth=await authStore.load();
@@ -47,16 +47,27 @@ async function main(){
     if(approval!==APPROVAL_RECEIVE){stdout.write('CANCELLED_BEFORE_WEIXIN_POLL\n');return;}
     await webReady();
     assertOnlySucceeded(store.list());
-    const transport=new RealWeixinTransport({
+    lifecycleTransport=new RealWeixinTransport({
       authStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
     });
-    // ONE getupdates request. We may see earlier DM backlog mixed with the
-    // owner's new challenge: never consume unread extras by committing cursor.
-    const updates=await transport.poll();
-    const plan=planChallengeWithPreservedBacklog(updates,{
+    await lifecycleTransport.notifyStart();
+    lifecycleStarted=true;
+    stdout.write('WEIXIN_NOTIFY_START_OK\n');
+    // The newly sent DM can take a few seconds to become visible to getupdates.
+    // Retry only a completely empty/foreign-only miss. Each failed attempt uses
+    // a fresh transport from the original durable cursor and is discarded
+    // without commit, so no upstream cursor or unread DM can be consumed.
+    const polled=await pollChallengeWithGrace({
+      transportFactory:()=>new RealWeixinTransport({
+        authStore,allowedPeer:binding,inboundEnabled:true,outboundEnabled:false
+      }),
       challenge,accountId:auth.accountId,peer:binding,
-      findStoredInbound:inboundKey=>store.getByInboundKey(inboundKey)
+      findStoredInbound:inboundKey=>store.getByInboundKey(inboundKey),
+      attempts:3,delayMs:1500,
+      sleep:async ms=>{stdout.write('CHALLENGE_NOT_VISIBLE_YET. Waiting '+ms+'ms without cursor commit.\n');await sleep(ms);}
     });
+    const {transport,plan}=polled;
+    stdout.write('CHALLENGE_POLL_ATTEMPTS='+polled.attempt+'\n');
     stdout.write('SAFE_BATCH_COUNTS other_allowed='+plan.additionalAllowedCount+
       ' still_unrecorded='+plan.unrecordedAllowedCount+
       ' cursor_commit_allowed='+plan.canAdvanceCursor+'\n');
@@ -86,6 +97,14 @@ async function main(){
       await sleep(INTERVAL_MS);
     }
     throw Error('CHATGPT_REPLY_NOT_CONFIRMED_REVIEW_BEFORE_RETRY');
-  }finally{rl.close();store?.close();key.fill(0);}
+  }finally{
+    if(lifecycleStarted){
+      try{await lifecycleTransport.notifyStop();stdout.write('WEIXIN_NOTIFY_STOP_OK\n');}
+      catch{stdout.write('WEIXIN_NOTIFY_STOP_FAILED_IGNORED\n');}
+    }
+    rl.close();
+    store?.close();
+    key.fill(0);
+  }
 }
 try{await main();}catch(e){const s=e?.message||'';console.error(/^[A-Z0-9_:-]{1,140}$/.test(s)?s:'ONE_SHOT_INBOUND_FAILED');process.exitCode=1;}
